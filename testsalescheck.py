@@ -1090,9 +1090,19 @@ def api_quota(team: str, days: int = 15, authorization: Optional[str] = Header(d
     }
 
 def run_api_server():
-    # Railway gives PORT at runtime; keep 8000 as a safe default for local testing.
     port = int(os.getenv("PORT", "8000"))
-    uvicorn.run(api, host="0.0.0.0", port=port, log_level="info")
+    config = uvicorn.Config(
+        api,
+        host="0.0.0.0",
+        port=port,
+        log_level="info",
+    )
+    server = uvicorn.Server(config)
+
+    # IMPORTANT: uvicorn signal handlers crash in background threads
+    server.install_signal_handlers = lambda: None
+
+    server.run()
 
 # =================================================
 # START BOT
@@ -1148,5 +1158,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
