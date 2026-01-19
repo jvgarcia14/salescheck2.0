@@ -1132,6 +1132,9 @@ def run_telegram_bot(BOT_TOKEN: str):
 # =================================================
 # START BOT
 # =================================================
+def run_api_server():
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run(api, host="0.0.0.0", port=port, log_level="info")
 def main():
     load_all()
     load_teams()
@@ -1150,6 +1153,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
