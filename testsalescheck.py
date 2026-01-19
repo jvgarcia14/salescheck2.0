@@ -1091,19 +1091,20 @@ def api_quota(team: str, days: int = 15, authorization: Optional[str] = Header(d
 
 def run_api_server():
     port = int(os.getenv("PORT", "8000"))
+
     config = uvicorn.Config(
         api,
         host="0.0.0.0",
         port=port,
         log_level="info",
+        access_log=True,
     )
     server = uvicorn.Server(config)
 
-    # IMPORTANT: uvicorn signal handlers crash in background threads
+    # Critical: prevent signal handler install in a background thread
     server.install_signal_handlers = lambda: None
 
     server.run()
-
 # =================================================
 # START BOT
 # =================================================
@@ -1158,6 +1159,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
