@@ -18,6 +18,7 @@ from typing import Optional, Dict, Any, List
 # FASTAPI (for mobile app)
 # ---------------------------
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 # -------------------------------------------------
@@ -1140,3 +1141,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
