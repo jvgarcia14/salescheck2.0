@@ -1089,38 +1089,7 @@ def api_quota(team: str, days: int = 15, authorization: Optional[str] = Header(d
         "rows": rows,
     }
 
-def run_api_server():
-    port = int(os.getenv("PORT", "8000"))
-
-    config = uvicorn.Config(
-        api,
-        host="0.0.0.0",
-        port=port,
-        log_level="info",
-        access_log=True,
-    )
-    server = uvicorn.Server(config)
-
-    # Critical: prevent signal handler install in a background thread
-    server.install_signal_handlers = lambda: None
-
-    server.run()
-# =================================================
-# START BOT
-# =================================================
-def main():
-    load_all()
-    load_teams()
-    load_admins()
-
-    BOT_TOKEN = os.getenv("BOT_TOKEN")
-    if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN environment variable not set")
-
-    # Start FastAPI in background thread (so your phone app can connect)
-    t = threading.Thread(target=run_api_server, daemon=True)
-    t.start()
-
+def build_telegram_app(BOT_TOKEN: str):
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # sales messages
@@ -1143,7 +1112,7 @@ def main():
     app.add_handler(CommandHandler("redpages", redpages))
     app.add_handler(CommandHandler("setgoal", setgoal))
 
-    # bot-admin (level >= 1)
+    # bot-admin
     app.add_handler(CommandHandler("pagegoal", pagegoal))
     app.add_handler(CommandHandler("viewshiftgoals", viewshiftgoals))
     app.add_handler(CommandHandler("viewpagegoals", viewpagegoals))
@@ -1154,11 +1123,34 @@ def main():
     app.add_handler(CommandHandler("editgoalboard", editgoalboard))
     app.add_handler(CommandHandler("editpagegoals", editpagegoals))
 
-    print("BOT + API RUNNING…")
-    app.run_polling(close_loop=False)
+    return app
+
+def run_telegram_bot(BOT_TOKEN: str):
+    tg_app = build_telegram_app(BOT_TOKEN)
+    print("TELEGRAM BOT RUNNING…")
+    tg_app.run_polling(close_loop=False)
+# =================================================
+# START BOT
+# =================================================
+def main():
+    load_all()
+    load_teams()
+    load_admins()
+
+    BOT_TOKEN = os.getenv("BOT_TOKEN")
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN environment variable not set")
+
+    # Start telegram bot in background
+    threading.Thread(target=run_telegram_bot, args=(BOT_TOKEN,), daemon=True).start()
+
+    # Run API as main server (Railway needs this)
+    print("API SERVER STARTING…")
+    run_api_server()
 
 if __name__ == "__main__":
     main()
+
 
 
 
