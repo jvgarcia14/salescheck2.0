@@ -872,6 +872,13 @@ async def editpagegoals(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #               MOBILE API SECTION
 # =================================================
 api = FastAPI()
+api.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # allow phone apps / web during testing
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 API_TOKEN = os.getenv("API_TOKEN")  # set in Railway Variables
 
@@ -1141,4 +1148,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
