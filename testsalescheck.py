@@ -1,15 +1,31 @@
 # ==========================================
-#   ULTIMATE SALES + GOAL BOT
-#   SHIFT RESET + QUOTA (15/30D)
-#   + /registerteam, /unregisterteam (OWNER ONLY)
-#   + /registeradmin, /unregisteradmin, /listadmins (OWNER ONLY)
+#   ULTIMATE SALES + GOAL BOT (RAILWAY)
+#   - Shift-based /goalboard (auto “reset” by shift start time)
+#   - 15/30-day quotas: /quotahalf, /quotamonth
+#   - Tag-enforced pages (+100 #autumnpaid)
 #
-#   Permissions:
-#   - Everyone (in registered team groups):
-#       +sales (#tag), /goalboard, /leaderboard, /pages, /redpages
-#   - Bot-admins (registered by OWNER, level >= 1):
-#       /pagegoal, /viewshiftgoals, /viewpagegoals,
-#       /quotahalf, /quotamonth, /clearshiftgoals, /clearpagegoals
+#   OWNER ONLY (USER ID = 5249363872):
+#     /registerteam Team 1
+#     /unregisterteam
+#     /registeradmin 1   (reply to user to register them)
+#     /unregisteradmin   (reply or /unregisteradmin <user_id>)
+#     /listadmins
+#
+#   EVERYONE (in registered team groups):
+#     Sales input: +amount #tag
+#     /pages, /leaderboard, /goalboard, /redpages, /setgoal (SHIFT GOALS)
+#
+#   BOT-ADMINS (level >= 1):
+#     /pagegoal (PERIOD GOALS for 15/30)
+#     /viewshiftgoals, /viewpagegoals
+#     /clearshiftgoals, /clearpagegoals
+#     /quotahalf, /quotamonth
+#     /editgoalboard PAGE AMOUNT   (replaces shift total AND quota total for that page)
+#     /editpagegoals PAGE AMOUNT   (replaces quota total only for that page)
+#
+#   NOTE:
+#   - /editgoalboard affects BOTH /goalboard and quotas (15/30) for that page.
+#   - /editpagegoals affects quotas (15/30) only.
 # ==========================================
 
 from telegram import Update
@@ -25,7 +41,7 @@ import json, os
 # -------------------------------------------------
 # OWNER (ONLY THIS USER CAN REGISTER TEAM + ADMINS)
 # -------------------------------------------------
-OWNER_ID = 5513230302
+OWNER_ID = 5249363872
 
 # -------------------------------------------------
 # TIMEZONE (PH)
@@ -35,22 +51,22 @@ PH_TZ = ZoneInfo("Asia/Manila")
 # -------------------------------------------------
 # FILES
 # -------------------------------------------------
-TEAMS_FILE = "teams.json"           # chat_id -> team name
-ADMINS_FILE = "admins.json"         # chat_id -> { user_id: level }
-GOALS_FILE = "goals.json"           # {"shift_goals": {...}, "page_goals": {...}}
-SALES_FILE = "sales.json"           # lifetime totals
-SALES_LOG_FILE = "sales_log.json"   # event log
+TEAMS_FILE = "teams.json"                    # chat_id -> team name
+ADMINS_FILE = "admins.json"                  # chat_id -> { user_id: level }
+GOALS_FILE = "goals.json"                    # {"shift_goals": {...}, "page_goals": {...}}
+SALES_FILE = "sales.json"                    # lifetime totals (optional display)
+SALES_LOG_FILE = "sales_log.json"            # event log
+MANUAL_OVERRIDES_FILE = "manual_overrides.json"  # {"shift": {...}, "page": {...}}
 
 # -------------------------------------------------
-# DEFAULT TEAM MAP (optional seed)
-# You can keep empty if you want everything via /registerteam
+# DEFAULT TEAM MAP (optional)
 # -------------------------------------------------
 DEFAULT_GROUP_TEAMS = {
     # -1001234567890: "Team 1",
 }
 
 # -------------------------------------------------
-# PAGE ENFORCEMENT (TAGS ONLY)
+# PAGE TAGS (enforced)
 # Users must type: +200 #autumnpaid
 # -------------------------------------------------
 ALLOWED_PAGES = {
@@ -65,10 +81,15 @@ ALLOWED_PAGES = {
 GROUP_TEAMS = dict(DEFAULT_GROUP_TEAMS)      # chat_id -> team name
 CHAT_ADMINS = defaultdict(dict)              # chat_id -> {user_id: level}
 
-sales_data = defaultdict(lambda: defaultdict(float))  # lifetime totals
-shift_goals = defaultdict(float)                      # for /goalboard
-page_goals = defaultdict(float)                       # for /quotahalf & /quotamonth
-sales_log = []                                        # event log
+sales_data = defaultdict(lambda: defaultdict(float))  # lifetime totals (kept for compatibility)
+shift_goals = defaultdict(float)                      # SHIFT goals (for /goalboard, /redpages)
+page_goals = defaultdict(float)                       # PERIOD goals (for quotas)
+sales_log = []                                        # events: {"ts","user","page","amt"}
+
+# Manual replacement overrides:
+manual_shift_totals = defaultdict(float)              # replaces /goalboard totals per page
+manual_page_totals = defaultdict(float)               # replaces /quotahalf & /quotamonth totals per page
+
 
 # -------------------------------------------------
 # UTIL
@@ -109,6 +130,20 @@ def normalize_page(raw_page: str):
         return None
     return ALLOWED_PAGES.get(token)
 
+def canonicalize_page_name(page_str: str) -> str | None:
+    """
+    Accept either:
+      - tag: "#autumnpaid"
+      - canonical page: "AUTUMN PAID"
+    Returns canonical page name string, or None if invalid tag.
+    """
+    page_str = clean(page_str)
+    if not page_str:
+        return None
+    if page_str.lower().startswith("#"):
+        return ALLOWED_PAGES.get(page_str.lower())
+    return page_str
+
 def current_shift_label(dt: datetime) -> str:
     """
     Prime = 8am–4pm
@@ -146,6 +181,7 @@ def get_team(chat_id: int):
 def is_owner(update: Update) -> bool:
     return bool(update.effective_user) and update.effective_user.id == OWNER_ID
 
+
 # -------------------------------------------------
 # PERSISTENCE
 # -------------------------------------------------
@@ -161,6 +197,12 @@ def save_all():
 
     with open(SALES_LOG_FILE, "w") as f:
         json.dump(sales_log, f)
+
+    with open(MANUAL_OVERRIDES_FILE, "w") as f:
+        json.dump({
+            "shift": dict(manual_shift_totals),
+            "page": dict(manual_page_totals),
+        }, f)
 
 def load_all():
     if os.path.exists(SALES_FILE):
@@ -188,6 +230,14 @@ def load_all():
             raw = json.load(f)
             if isinstance(raw, list):
                 sales_log.extend(raw)
+
+    if os.path.exists(MANUAL_OVERRIDES_FILE):
+        with open(MANUAL_OVERRIDES_FILE, "r") as f:
+            raw = json.load(f)
+            for p, v in raw.get("shift", {}).items():
+                manual_shift_totals[p] = float(v)
+            for p, v in raw.get("page", {}).items():
+                manual_page_totals[p] = float(v)
 
 def save_teams():
     with open(TEAMS_FILE, "w") as f:
@@ -230,6 +280,7 @@ def load_admins():
                             except Exception:
                                 continue
 
+
 # -------------------------------------------------
 # ACCESS CONTROL
 # -------------------------------------------------
@@ -263,6 +314,7 @@ async def require_team(update: Update) -> str | None:
         return None
     return team
 
+
 # -------------------------------------------------
 # GOAL COLOR
 # -------------------------------------------------
@@ -274,12 +326,14 @@ def get_color(p):
     if p >= 11: return "🟠"
     return "🔴"
 
+
 # -------------------------------------------------
-# PUBLIC: /chatid (works anywhere)
+# BASIC: /chatid (works anywhere)
 # -------------------------------------------------
 async def chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     await update.message.reply_text(f"Chat type: {chat.type}\nChat ID: {chat.id}")
+
 
 # -------------------------------------------------
 # OWNER ONLY: /registerteam Team 1
@@ -287,7 +341,6 @@ async def chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def registerteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == "private":
         return await update.message.reply_text("Run this command inside the team group (not in private).")
-
     if not await require_owner(update):
         return
 
@@ -300,10 +353,7 @@ async def registerteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_teams()
 
     await update.message.reply_text(
-        f"✅ Registered this group!\n\n"
-        f"Team: {team_name}\n"
-        f"Chat ID: {chat_id}\n\n"
-        f"Next (owner): /registeradmin 1"
+        f"✅ Registered this group!\n\nTeam: {team_name}\nChat ID: {chat_id}\n\nNext: /registeradmin 1"
     )
 
 # -------------------------------------------------
@@ -312,7 +362,6 @@ async def registerteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def unregisterteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == "private":
         return await update.message.reply_text("Run this command inside the team group (not in private).")
-
     if not await require_owner(update):
         return
 
@@ -323,24 +372,20 @@ async def unregisterteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
     team = GROUP_TEAMS.pop(chat_id, None)
     save_teams()
 
-    # optional: also remove bot-admin assignments for that chat
+    # also remove bot-admins for that chat (optional)
     if chat_id in CHAT_ADMINS:
         del CHAT_ADMINS[chat_id]
         save_admins()
 
-    await update.message.reply_text(
-        f"🗑️ Team unregistered.\n\nRemoved team: {team}\nChat ID: {chat_id}"
-    )
+    await update.message.reply_text(f"🗑️ Team unregistered.\nRemoved team: {team}\nChat ID: {chat_id}")
+
 
 # -------------------------------------------------
-# OWNER ONLY: /registeradmin 1
-# - If used while replying to someone, registers that person.
-# - Otherwise registers the command sender (owner).
+# OWNER ONLY: /registeradmin 1 (reply to user)
 # -------------------------------------------------
 async def registeradmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == "private":
         return await update.message.reply_text("Run this command inside the team group (not in private).")
-
     if not await require_owner(update):
         return
 
@@ -368,13 +413,11 @@ async def registeradmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Registered bot-admin: {name} (level {level})")
 
 # -------------------------------------------------
-# OWNER ONLY: /unregisteradmin
-# - Reply to user OR provide user_id: /unregisteradmin 12345
+# OWNER ONLY: /unregisteradmin (reply) or /unregisteradmin <user_id>
 # -------------------------------------------------
 async def unregisteradmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == "private":
         return await update.message.reply_text("Run this command inside the team group (not in private).")
-
     if not await require_owner(update):
         return
 
@@ -392,16 +435,15 @@ async def unregisteradmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             target_id = int(context.args[0])
             target_label = str(target_id)
         except ValueError:
-            return await update.message.reply_text("Use: reply to a user then /unregisteradmin\nor: /unregisteradmin <user_id>")
+            return await update.message.reply_text("Use: reply then /unregisteradmin\nor: /unregisteradmin <user_id>")
     else:
-        return await update.message.reply_text("Use: reply to a user then /unregisteradmin\nor: /unregisteradmin <user_id>")
+        return await update.message.reply_text("Use: reply then /unregisteradmin\nor: /unregisteradmin <user_id>")
 
     if target_id not in CHAT_ADMINS.get(chat_id, {}):
         return await update.message.reply_text("That user is not a bot-admin in this group.")
 
     del CHAT_ADMINS[chat_id][target_id]
     save_admins()
-
     await update.message.reply_text(f"🗑️ Removed bot-admin access for: {target_label}")
 
 # -------------------------------------------------
@@ -410,7 +452,6 @@ async def unregisteradmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def listadmins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == "private":
         return await update.message.reply_text("Run this command inside the team group (not in private).")
-
     if not await require_owner(update):
         return
 
@@ -425,6 +466,7 @@ async def listadmins(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"• User ID: {uid} — level {int(lvl)}")
 
     await update.message.reply_text("👑 Bot Admins (this group):\n\n" + "\n".join(lines))
+
 
 # -------------------------------------------------
 # SALES INPUT: +amount #tag
@@ -465,6 +507,7 @@ async def handle_sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
             unknown_tags.add(bad_token)
             continue
 
+        # record event
         sales_log.append({
             "ts": ts_iso,
             "user": internal,
@@ -472,6 +515,7 @@ async def handle_sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "amt": float(amount),
         })
 
+        # update lifetime totals
         sales_data[internal][canonical_page] = sales_data[internal].get(canonical_page, 0.0) + float(amount)
         saved = True
 
@@ -489,8 +533,9 @@ async def handle_sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{allowed}"
         )
 
+
 # -------------------------------------------------
-# /PAGES (everyone)
+# /PAGES (everyone, team-only)
 # -------------------------------------------------
 async def pages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     team = await require_team(update)
@@ -503,8 +548,9 @@ async def pages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = [f"{tag} → {ALLOWED_PAGES[tag]}" for tag in sorted(ALLOWED_PAGES.keys())]
     await update.message.reply_text(f"📘 Approved Pages (use tags) — {team}\n\n" + "\n".join(lines))
 
+
 # -------------------------------------------------
-# /LEADERBOARD (everyone) - lifetime
+# /LEADERBOARD (everyone, lifetime)
 # -------------------------------------------------
 async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     team = await require_team(update)
@@ -529,114 +575,9 @@ async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"{i}. {u} ({p}) — ${a:.2f}\n"
     await update.message.reply_text(msg)
 
-# -------------------------------------------------
-# /GOALBOARD (everyone) - shift sales vs SHIFT GOALS
-# -------------------------------------------------
-async def goalboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    team = await require_team(update)
-    if team is None:
-        return
-
-    now = now_ph()
-    start = shift_start(now)
-    label = current_shift_label(now)
-
-    per_user = defaultdict(lambda: defaultdict(float))
-
-    for ev in sales_log:
-        try:
-            ev_team = split_internal(ev["user"])[1]
-            if ev_team != team:
-                continue
-            ev_dt = parse_ts(ev["ts"])
-            if ev_dt < start:
-                continue
-            per_user[ev["user"]][ev["page"]] += float(ev["amt"])
-        except Exception:
-            continue
-
-    if not per_user:
-        return await update.message.reply_text(
-            f"🎯 GOAL PROGRESS — {team}\n"
-            f"🕒 Shift: {label}\n"
-            f"✅ Shift started: {start.strftime('%b %d, %Y %I:%M %p')} (PH)\n\n"
-            "No sales yet for this shift."
-        )
-
-    data = []
-    for internal, pages_map in per_user.items():
-        uname, _ = split_internal(internal)
-        total = sum(pages_map.values())
-        data.append((uname, pages_map, total))
-
-    data.sort(key=lambda x: x[2], reverse=True)
-
-    msg = f"🎯 GOAL PROGRESS — {team}\n"
-    msg += f"🕒 Shift: {label}\n"
-    msg += f"✅ Shift started: {start.strftime('%b %d, %Y %I:%M %p')} (PH)\n\n"
-
-    for i, (uname, pages_map, _) in enumerate(data, 1):
-        msg += f"{i}. {uname}\n"
-        for page, amt in pages_map.items():
-            goal = shift_goals.get(page, 0)
-            if goal:
-                pct = (amt / goal) * 100
-                msg += f"   {get_color(pct)} {page}: ${amt:.2f} / ${goal:.2f} ({pct:.1f}%)\n"
-            else:
-                msg += f"   ⚪ {page}: ${amt:.2f} (no shift goal)\n"
-        msg += "\n"
-
-    await update.message.reply_text(msg)
 
 # -------------------------------------------------
-# /REDPAGES (everyone) - shift pages below 31% of SHIFT GOALS
-# -------------------------------------------------
-async def redpages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    team = await require_team(update)
-    if team is None:
-        return
-
-    now = now_ph()
-    start = shift_start(now)
-    label = current_shift_label(now)
-
-    totals = defaultdict(float)
-    for ev in sales_log:
-        try:
-            ev_team = split_internal(ev["user"])[1]
-            if ev_team != team:
-                continue
-            ev_dt = parse_ts(ev["ts"])
-            if ev_dt < start:
-                continue
-            totals[ev["page"]] += float(ev["amt"])
-        except Exception:
-            continue
-
-    msg = f"🚨 RED PAGES — {team}\n"
-    msg += f"🕒 Shift: {label}\n"
-    msg += f"✅ Shift started: {start.strftime('%b %d, %Y %I:%M %p')} (PH)\n\n"
-
-    any_found = False
-    for page, amt in sorted(totals.items()):
-        goal = shift_goals.get(page, 0)
-        if goal <= 0:
-            continue
-        pct = (amt / goal) * 100
-        if pct < 31:
-            any_found = True
-            msg += f"🔴 {page}: ${amt:.2f} / ${goal:.2f} ({pct:.1f}%)\n"
-
-    if not any_found:
-        return await update.message.reply_text("✅ No red pages right now (this shift).")
-
-    await update.message.reply_text(msg)
-
-# -------------------------------------------------
-# GOALS
-# /setgoal = SHIFT GOALS (everyone can run)
-# /pagegoal, /viewshiftgoals, /viewpagegoals,
-# /quotahalf, /quotamonth, /clear* = BOT-ADMIN ONLY
+# /SETGOAL (everyone, shift goals)
 # -------------------------------------------------
 async def setgoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     team = await require_team(update)
@@ -670,11 +611,15 @@ async def setgoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += "\n\n⚠️ Invalid:\n" + "\n".join(errors)
     await update.message.reply_text(msg)
 
+
+# -------------------------------------------------
+# /PAGEGOAL (bot-admin only, period goals)
+# -------------------------------------------------
 async def pagegoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     team = await require_team(update)
     if team is None:
         return
-    if not await require_registered_admin(update, min_level=1):
+    if not await require_registered_admin(update, 1):
         return
 
     raw = update.message.text.replace("/pagegoal", "", 1).strip()
@@ -704,11 +649,15 @@ async def pagegoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += "\n\n⚠️ Invalid:\n" + "\n".join(errors)
     await update.message.reply_text(msg)
 
+
+# -------------------------------------------------
+# VIEW/CLEAR GOALS (bot-admin only)
+# -------------------------------------------------
 async def viewshiftgoals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     team = await require_team(update)
     if team is None:
         return
-    if not await require_registered_admin(update, min_level=1):
+    if not await require_registered_admin(update, 1):
         return
 
     if not shift_goals:
@@ -723,7 +672,7 @@ async def viewpagegoals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     team = await require_team(update)
     if team is None:
         return
-    if not await require_registered_admin(update, min_level=1):
+    if not await require_registered_admin(update, 1):
         return
 
     if not page_goals:
@@ -738,7 +687,7 @@ async def clearshiftgoals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     team = await require_team(update)
     if team is None:
         return
-    if not await require_registered_admin(update, min_level=1):
+    if not await require_registered_admin(update, 1):
         return
 
     shift_goals.clear()
@@ -749,21 +698,142 @@ async def clearpagegoals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     team = await require_team(update)
     if team is None:
         return
-    if not await require_registered_admin(update, min_level=1):
+    if not await require_registered_admin(update, 1):
         return
 
     page_goals.clear()
     save_all()
     await update.message.reply_text("🧹 Cleared all PAGE goals (15/30 days).")
 
+
 # -------------------------------------------------
-# QUOTAS (BOT-ADMIN ONLY)
+# /GOALBOARD (everyone) - SHIFT sales vs SHIFT GOALS
+# Manual overrides: manual_shift_totals replaces totals per page.
+# -------------------------------------------------
+async def goalboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    team = await require_team(update)
+    if team is None:
+        return
+
+    now = now_ph()
+    start = shift_start(now)
+    label = current_shift_label(now)
+
+    per_user = defaultdict(lambda: defaultdict(float))
+
+    for ev in sales_log:
+        try:
+            ev_team = split_internal(ev["user"])[1]
+            if ev_team != team:
+                continue
+            ev_dt = parse_ts(ev["ts"])
+            if ev_dt < start:
+                continue
+            per_user[ev["user"]][ev["page"]] += float(ev["amt"])
+        except Exception:
+            continue
+
+    # Apply manual shift replacement totals (TEAM-wide). Display under a pseudo-user "MANUAL OVERRIDE"
+    # Also makes sure pages appear even if no sales.
+    if manual_shift_totals:
+        internal_manual = f"__MANUAL_OVERRIDE__|{team}"
+        for page, val in manual_shift_totals.items():
+            per_user[internal_manual][page] = float(val)
+
+    if not per_user:
+        return await update.message.reply_text(
+            f"🎯 GOAL PROGRESS — {team}\n"
+            f"🕒 Shift: {label}\n"
+            f"✅ Shift started: {start.strftime('%b %d, %Y %I:%M %p')} (PH)\n\n"
+            "No sales yet for this shift."
+        )
+
+    # Build display list
+    data = []
+    for internal, pages_map in per_user.items():
+        uname, _ = split_internal(internal)
+        total = sum(pages_map.values())
+        data.append((uname, pages_map, total))
+
+    data.sort(key=lambda x: x[2], reverse=True)
+
+    msg = f"🎯 GOAL PROGRESS — {team}\n"
+    msg += f"🕒 Shift: {label}\n"
+    msg += f"✅ Shift started: {start.strftime('%b %d, %Y %I:%M %p')} (PH)\n\n"
+
+    for i, (uname, pages_map, _) in enumerate(data, 1):
+        msg += f"{i}. {uname}\n"
+        for page, amt in pages_map.items():
+            goal = shift_goals.get(page, 0)
+            if goal:
+                pct = (amt / goal) * 100
+                msg += f"   {get_color(pct)} {page}: ${amt:.2f} / ${goal:.2f} ({pct:.1f}%)\n"
+            else:
+                msg += f"   ⚪ {page}: ${amt:.2f} (no shift goal)\n"
+        msg += "\n"
+
+    await update.message.reply_text(msg)
+
+
+# -------------------------------------------------
+# /REDPAGES (everyone) - SHIFT pages below 31% of SHIFT GOALS
+# Uses manual_shift_totals if present for a page (replacement).
+# -------------------------------------------------
+async def redpages(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    team = await require_team(update)
+    if team is None:
+        return
+
+    now = now_ph()
+    start = shift_start(now)
+    label = current_shift_label(now)
+
+    totals = defaultdict(float)
+    for ev in sales_log:
+        try:
+            ev_team = split_internal(ev["user"])[1]
+            if ev_team != team:
+                continue
+            ev_dt = parse_ts(ev["ts"])
+            if ev_dt < start:
+                continue
+            totals[ev["page"]] += float(ev["amt"])
+        except Exception:
+            continue
+
+    # apply replacement totals
+    for page, val in manual_shift_totals.items():
+        totals[page] = float(val)
+
+    msg = f"🚨 RED PAGES — {team}\n"
+    msg += f"🕒 Shift: {label}\n"
+    msg += f"✅ Shift started: {start.strftime('%b %d, %Y %I:%M %p')} (PH)\n\n"
+
+    any_found = False
+    for page, amt in sorted(totals.items()):
+        goal = shift_goals.get(page, 0)
+        if goal <= 0:
+            continue
+        pct = (amt / goal) * 100
+        if pct < 31:
+            any_found = True
+            msg += f"🔴 {page}: ${amt:.2f} / ${goal:.2f} ({pct:.1f}%)\n"
+
+    if not any_found:
+        return await update.message.reply_text("✅ No red pages right now (this shift).")
+
+    await update.message.reply_text(msg)
+
+
+# -------------------------------------------------
+# QUOTAS (bot-admin only)
+# Manual overrides: manual_page_totals replaces totals per page.
 # -------------------------------------------------
 async def quota_period(update: Update, context: ContextTypes.DEFAULT_TYPE, days: int, title: str):
     team = await require_team(update)
     if team is None:
         return
-    if not await require_registered_admin(update, min_level=1):
+    if not await require_registered_admin(update, 1):
         return
 
     cutoff = now_ph() - timedelta(days=days)
@@ -780,6 +850,10 @@ async def quota_period(update: Update, context: ContextTypes.DEFAULT_TYPE, days:
             totals[ev["page"]] += float(ev["amt"])
         except Exception:
             continue
+
+    # apply replacement totals (quota override)
+    for page, val in manual_page_totals.items():
+        totals[page] = float(val)
 
     if not totals:
         return await update.message.reply_text(f"No sales found for the last {days} days.")
@@ -806,6 +880,78 @@ async def quotahalf(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def quotamonth(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await quota_period(update, context, days=30, title="QUOTA MONTH (30 DAYS)")
 
+
+# -------------------------------------------------
+# MANUAL REPLACEMENT EDITS (bot-admin only)
+# /editgoalboard PAGE AMOUNT:
+#   - replaces SHIFT total for PAGE
+#   - also sets quota total for PAGE to same amount
+# /editpagegoals PAGE AMOUNT:
+#   - replaces quota total for PAGE only
+# -------------------------------------------------
+async def editgoalboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    team = await require_team(update)
+    if team is None:
+        return
+    if not await require_registered_admin(update, 1):
+        return
+
+    raw = update.message.text.replace("/editgoalboard", "", 1).strip()
+    parts = raw.split()
+    if len(parts) < 2:
+        return await update.message.reply_text("Format: /editgoalboard PAGE AMOUNT\nExample: /editgoalboard AUTUMN PAID 2000")
+
+    amount_str = parts[-1]
+    page_str = " ".join(parts[:-1])
+
+    page = canonicalize_page_name(page_str)
+    if page is None:
+        return await update.message.reply_text("Invalid page/tag. Use a valid page name or hashtag tag.")
+
+    try:
+        amount = float(amount_str)
+    except ValueError:
+        return await update.message.reply_text("Amount must be a number. Example: /editgoalboard AUTUMN PAID 2000")
+
+    manual_shift_totals[page] = amount
+    manual_page_totals[page] = amount  # your requested behavior
+
+    save_all()
+    await update.message.reply_text(
+        f"✅ Updated totals\n\n"
+        f"Goalboard (shift): {page} = ${amount:.2f}\n"
+        f"Quotas (15/30): {page} = ${amount:.2f}"
+    )
+
+async def editpagegoals(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    team = await require_team(update)
+    if team is None:
+        return
+    if not await require_registered_admin(update, 1):
+        return
+
+    raw = update.message.text.replace("/editpagegoals", "", 1).strip()
+    parts = raw.split()
+    if len(parts) < 2:
+        return await update.message.reply_text("Format: /editpagegoals PAGE AMOUNT\nExample: /editpagegoals AUTUMN PAID 3000")
+
+    amount_str = parts[-1]
+    page_str = " ".join(parts[:-1])
+
+    page = canonicalize_page_name(page_str)
+    if page is None:
+        return await update.message.reply_text("Invalid page/tag. Use a valid page name or hashtag tag.")
+
+    try:
+        amount = float(amount_str)
+    except ValueError:
+        return await update.message.reply_text("Amount must be a number. Example: /editpagegoals AUTUMN PAID 3000")
+
+    manual_page_totals[page] = amount
+    save_all()
+    await update.message.reply_text(f"✅ Updated quotas\n{page} = ${amount:.2f} (15/30 days)")
+
+
 # -------------------------------------------------
 # START BOT
 # -------------------------------------------------
@@ -820,7 +966,7 @@ def main():
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # messages
+    # sales messages
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_sales))
 
     # basic
@@ -833,14 +979,14 @@ def main():
     app.add_handler(CommandHandler("unregisteradmin", unregisteradmin))
     app.add_handler(CommandHandler("listadmins", listadmins))
 
-    # everyone (registered groups only)
+    # everyone (team-only)
     app.add_handler(CommandHandler("pages", pages))
     app.add_handler(CommandHandler("leaderboard", leaderboard))
     app.add_handler(CommandHandler("goalboard", goalboard))
     app.add_handler(CommandHandler("redpages", redpages))
-    app.add_handler(CommandHandler("setgoal", setgoal))  # shift goals
+    app.add_handler(CommandHandler("setgoal", setgoal))
 
-    # bot-admin only
+    # bot-admin (level >= 1)
     app.add_handler(CommandHandler("pagegoal", pagegoal))
     app.add_handler(CommandHandler("viewshiftgoals", viewshiftgoals))
     app.add_handler(CommandHandler("viewpagegoals", viewpagegoals))
@@ -848,10 +994,11 @@ def main():
     app.add_handler(CommandHandler("clearpagegoals", clearpagegoals))
     app.add_handler(CommandHandler("quotahalf", quotahalf))
     app.add_handler(CommandHandler("quotamonth", quotamonth))
+    app.add_handler(CommandHandler("editgoalboard", editgoalboard))
+    app.add_handler(CommandHandler("editpagegoals", editpagegoals))
 
     print("BOT RUNNING…")
     app.run_polling(close_loop=False)
 
 if __name__ == "__main__":
     main()
-
