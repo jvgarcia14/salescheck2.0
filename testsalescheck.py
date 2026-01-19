@@ -1,13 +1,15 @@
 # ==========================================
 #   ULTIMATE SALES + GOAL BOT
 #   SHIFT RESET + QUOTA (15/30D)
-#   + /registerteam (chat admin only)
-#   + /registeradmin <level> (chat admin only)
-#   Roles:
-#     - Everyone can record sales + see shift stats (/goalboard, /leaderboard, /pages, /redpages)
-#     - ONLY registered admins (level >= 1) can use:
-#         /pagegoal, /viewshiftgoals, /viewpagegoals, /quotahalf, /quotamonth
-#     - Chat admins can register teams and register bot-admins
+#   + /registerteam, /unregisterteam (OWNER ONLY)
+#   + /registeradmin, /unregisteradmin, /listadmins (OWNER ONLY)
+#
+#   Permissions:
+#   - Everyone (in registered team groups):
+#       +sales (#tag), /goalboard, /leaderboard, /pages, /redpages
+#   - Bot-admins (registered by OWNER, level >= 1):
+#       /pagegoal, /viewshiftgoals, /viewpagegoals,
+#       /quotahalf, /quotamonth, /clearshiftgoals, /clearpagegoals
 # ==========================================
 
 from telegram import Update
@@ -19,6 +21,11 @@ from collections import defaultdict
 from datetime import datetime, timedelta, time
 from zoneinfo import ZoneInfo
 import json, os
+
+# -------------------------------------------------
+# OWNER (ONLY THIS USER CAN REGISTER TEAM + ADMINS)
+# -------------------------------------------------
+OWNER_ID = 5249363872
 
 # -------------------------------------------------
 # TIMEZONE (PH)
@@ -39,7 +46,7 @@ SALES_LOG_FILE = "sales_log.json"   # event log
 # You can keep empty if you want everything via /registerteam
 # -------------------------------------------------
 DEFAULT_GROUP_TEAMS = {
-    # -1003316845910: "Team 1",
+    # -1001234567890: "Team 1",
 }
 
 # -------------------------------------------------
@@ -55,24 +62,13 @@ ALLOWED_PAGES = {
 # -------------------------------------------------
 # DATA STORAGE
 # -------------------------------------------------
-# Runtime team map (loaded from teams.json + defaults)
-GROUP_TEAMS = dict(DEFAULT_GROUP_TEAMS)
+GROUP_TEAMS = dict(DEFAULT_GROUP_TEAMS)      # chat_id -> team name
+CHAT_ADMINS = defaultdict(dict)              # chat_id -> {user_id: level}
 
-# Bot-admins per chat: {chat_id: {user_id: level}}
-CHAT_ADMINS = defaultdict(dict)
-
-# Lifetime totals
-sales_data = defaultdict(lambda: defaultdict(float))
-
-# Goals split:
-shift_goals = defaultdict(float)   # used by /goalboard (shift goal)
-page_goals  = defaultdict(float)   # used by /quotahalf & /quotamonth (period goal)
-
-# Sales event log
-sales_log = []
-
-# Undo buffer
-last_deleted = None
+sales_data = defaultdict(lambda: defaultdict(float))  # lifetime totals
+shift_goals = defaultdict(float)                      # for /goalboard
+page_goals = defaultdict(float)                       # for /quotahalf & /quotamonth
+sales_log = []                                        # event log
 
 # -------------------------------------------------
 # UTIL
@@ -96,7 +92,6 @@ def parse_ts(iso_str: str) -> datetime:
     return datetime.fromisoformat(iso_str)
 
 def split_internal(internal: str):
-    # "username|Team 1"
     parts = internal.split("|", 1)
     if len(parts) != 2:
         return internal, ""
@@ -105,7 +100,7 @@ def split_internal(internal: str):
 def normalize_page(raw_page: str):
     """
     Enforce pages via tags like #autumnpaid.
-    Takes the FIRST token after the amount.
+    Takes FIRST token after amount.
     """
     if not raw_page:
         return None
@@ -143,11 +138,13 @@ def shift_start(dt: datetime) -> datetime:
     if time(16, 0, tzinfo=PH_TZ) <= t < time(23, 59, 59, tzinfo=PH_TZ):
         return datetime.combine(d, time(16, 0), PH_TZ)
 
-    # 00:00–08:00
     return datetime.combine(d, time(0, 0), PH_TZ)
 
 def get_team(chat_id: int):
     return GROUP_TEAMS.get(chat_id)
+
+def is_owner(update: Update) -> bool:
+    return bool(update.effective_user) and update.effective_user.id == OWNER_ID
 
 # -------------------------------------------------
 # PERSISTENCE
@@ -176,14 +173,13 @@ def load_all():
     if os.path.exists(GOALS_FILE):
         with open(GOALS_FILE, "r") as f:
             raw = json.load(f)
-            # Backward compatible if old format existed
+            # Backward compatible: old file might be {page: goal}
             if isinstance(raw, dict) and "shift_goals" in raw and "page_goals" in raw:
                 for page, goal in raw.get("shift_goals", {}).items():
                     shift_goals[page] = float(goal)
                 for page, goal in raw.get("page_goals", {}).items():
                     page_goals[page] = float(goal)
             else:
-                # old format: everything was page goals
                 for page, goal in raw.items():
                     page_goals[page] = float(goal)
 
@@ -230,45 +226,42 @@ def load_admins():
                     if isinstance(users, dict):
                         for uid_str, lvl in users.items():
                             try:
-                                uid = int(uid_str)
-                                CHAT_ADMINS[chat_id][uid] = int(lvl)
+                                CHAT_ADMINS[chat_id][int(uid_str)] = int(lvl)
                             except Exception:
                                 continue
 
 # -------------------------------------------------
 # ACCESS CONTROL
 # -------------------------------------------------
-async def is_chat_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Telegram chat admin/creator check."""
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-    admins = await context.bot.get_chat_administrators(chat_id)
-    return any(a.user.id == user_id for a in admins)
+async def require_owner(update: Update) -> bool:
+    if not is_owner(update):
+        await update.message.reply_text("⛔ Only the bot owner can use this command.")
+        return False
+    return True
 
 def is_registered_admin(chat_id: int, user_id: int, min_level: int = 1) -> bool:
     return int(CHAT_ADMINS.get(chat_id, {}).get(user_id, 0)) >= min_level
 
-async def require_team(update: Update) -> str | None:
-    team = get_team(update.effective_chat.id)
-    if team is None:
-        await update.message.reply_text(
-            "Not a team group yet.\n\n"
-            "Admin can register this group using:\n"
-            "/registerteam Team 1\n\n"
-            "To see the group ID:\n"
-            "/chatid"
-        )
-        return None
-    return team
-
-async def require_registered_admin(update: Update, min_level: int = 1):
-    """Allows only bot-registered admins (not just Telegram admins)."""
+async def require_registered_admin(update: Update, min_level: int = 1) -> bool:
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
     if not is_registered_admin(chat_id, user_id, min_level=min_level):
         await update.message.reply_text("⛔ You don’t have permission to use this command.")
         return False
     return True
+
+async def require_team(update: Update) -> str | None:
+    team = get_team(update.effective_chat.id)
+    if team is None:
+        await update.message.reply_text(
+            "Not a team group yet.\n\n"
+            "Owner can register this group using:\n"
+            "/registerteam Team 1\n\n"
+            "To see the group ID:\n"
+            "/chatid"
+        )
+        return None
+    return team
 
 # -------------------------------------------------
 # GOAL COLOR
@@ -289,15 +282,14 @@ async def chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Chat type: {chat.type}\nChat ID: {chat.id}")
 
 # -------------------------------------------------
-# ADMIN (Telegram chat admin): /registerteam Team 1
-# Registers this group chat_id -> team name
+# OWNER ONLY: /registerteam Team 1
 # -------------------------------------------------
 async def registerteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == "private":
         return await update.message.reply_text("Run this command inside the team group (not in private).")
 
-    if not await is_chat_admin(update, context):
-        return await update.message.reply_text("Only Telegram group admins can register a team.")
+    if not await require_owner(update):
+        return
 
     team_name = clean(" ".join(context.args)).strip()
     if not team_name:
@@ -311,23 +303,51 @@ async def registerteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"✅ Registered this group!\n\n"
         f"Team: {team_name}\n"
         f"Chat ID: {chat_id}\n\n"
-        f"Next: /registeradmin 1 (to give yourself bot-admin access)"
+        f"Next (owner): /registeradmin 1"
     )
 
 # -------------------------------------------------
-# ADMIN (Telegram chat admin): /registeradmin 1
-# - If used while replying to a user, registers that user.
-# - Otherwise registers the command sender.
+# OWNER ONLY: /unregisterteam
+# -------------------------------------------------
+async def unregisterteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type == "private":
+        return await update.message.reply_text("Run this command inside the team group (not in private).")
+
+    if not await require_owner(update):
+        return
+
+    chat_id = update.effective_chat.id
+    if chat_id not in GROUP_TEAMS:
+        return await update.message.reply_text("This group is not registered.")
+
+    team = GROUP_TEAMS.pop(chat_id, None)
+    save_teams()
+
+    # optional: also remove bot-admin assignments for that chat
+    if chat_id in CHAT_ADMINS:
+        del CHAT_ADMINS[chat_id]
+        save_admins()
+
+    await update.message.reply_text(
+        f"🗑️ Team unregistered.\n\nRemoved team: {team}\nChat ID: {chat_id}"
+    )
+
+# -------------------------------------------------
+# OWNER ONLY: /registeradmin 1
+# - If used while replying to someone, registers that person.
+# - Otherwise registers the command sender (owner).
 # -------------------------------------------------
 async def registeradmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == "private":
         return await update.message.reply_text("Run this command inside the team group (not in private).")
 
-    if not await is_chat_admin(update, context):
-        return await update.message.reply_text("Only Telegram group admins can register bot-admins.")
+    if not await require_owner(update):
+        return
 
     if not context.args:
-        return await update.message.reply_text("Format: /registeradmin 1\n(Optional: reply to a user to register them)")
+        return await update.message.reply_text(
+            "Format: /registeradmin 1\nTip: reply to a user then run /registeradmin 1"
+        )
 
     try:
         level = int(context.args[0])
@@ -336,7 +356,6 @@ async def registeradmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_id = update.effective_chat.id
 
-    # target: replied user or self
     if update.message.reply_to_message and update.message.reply_to_message.from_user:
         target_user = update.message.reply_to_message.from_user
     else:
@@ -347,6 +366,65 @@ async def registeradmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     name = clean(target_user.username or target_user.first_name or str(target_user.id))
     await update.message.reply_text(f"✅ Registered bot-admin: {name} (level {level})")
+
+# -------------------------------------------------
+# OWNER ONLY: /unregisteradmin
+# - Reply to user OR provide user_id: /unregisteradmin 12345
+# -------------------------------------------------
+async def unregisteradmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type == "private":
+        return await update.message.reply_text("Run this command inside the team group (not in private).")
+
+    if not await require_owner(update):
+        return
+
+    chat_id = update.effective_chat.id
+
+    target_id = None
+    target_label = None
+
+    if update.message.reply_to_message and update.message.reply_to_message.from_user:
+        u = update.message.reply_to_message.from_user
+        target_id = u.id
+        target_label = clean(u.username or u.first_name or str(u.id))
+    elif context.args:
+        try:
+            target_id = int(context.args[0])
+            target_label = str(target_id)
+        except ValueError:
+            return await update.message.reply_text("Use: reply to a user then /unregisteradmin\nor: /unregisteradmin <user_id>")
+    else:
+        return await update.message.reply_text("Use: reply to a user then /unregisteradmin\nor: /unregisteradmin <user_id>")
+
+    if target_id not in CHAT_ADMINS.get(chat_id, {}):
+        return await update.message.reply_text("That user is not a bot-admin in this group.")
+
+    del CHAT_ADMINS[chat_id][target_id]
+    save_admins()
+
+    await update.message.reply_text(f"🗑️ Removed bot-admin access for: {target_label}")
+
+# -------------------------------------------------
+# OWNER ONLY: /listadmins
+# -------------------------------------------------
+async def listadmins(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type == "private":
+        return await update.message.reply_text("Run this command inside the team group (not in private).")
+
+    if not await require_owner(update):
+        return
+
+    chat_id = update.effective_chat.id
+    admins = CHAT_ADMINS.get(chat_id, {})
+
+    if not admins:
+        return await update.message.reply_text("No bot-admins registered in this group.")
+
+    lines = []
+    for uid, lvl in sorted(admins.items(), key=lambda x: (-int(x[1]), int(x[0]))):
+        lines.append(f"• User ID: {uid} — level {int(lvl)}")
+
+    await update.message.reply_text("👑 Bot Admins (this group):\n\n" + "\n".join(lines))
 
 # -------------------------------------------------
 # SALES INPUT: +amount #tag
@@ -500,7 +578,7 @@ async def goalboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for i, (uname, pages_map, _) in enumerate(data, 1):
         msg += f"{i}. {uname}\n"
         for page, amt in pages_map.items():
-            goal = shift_goals.get(page, 0)  # SHIFT GOALS here
+            goal = shift_goals.get(page, 0)
             if goal:
                 pct = (amt / goal) * 100
                 msg += f"   {get_color(pct)} {page}: ${amt:.2f} / ${goal:.2f} ({pct:.1f}%)\n"
@@ -555,64 +633,10 @@ async def redpages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg)
 
 # -------------------------------------------------
-# RESTRICTED COMMANDS (bot-admin level >= 1)
-# /quotahalf, /quotamonth use PAGE GOALS
-# -------------------------------------------------
-async def quota_period(update: Update, context: ContextTypes.DEFAULT_TYPE, days: int, title: str):
-    team = await require_team(update)
-    if team is None:
-        return
-    if not await require_registered_admin(update, min_level=1):
-        return
-
-    cutoff = now_ph() - timedelta(days=days)
-    totals = defaultdict(float)
-
-    for ev in sales_log:
-        try:
-            ev_team = split_internal(ev["user"])[1]
-            if ev_team != team:
-                continue
-            ev_dt = parse_ts(ev["ts"])
-            if ev_dt < cutoff:
-                continue
-            totals[ev["page"]] += float(ev["amt"])
-        except Exception:
-            continue
-
-    if not totals:
-        return await update.message.reply_text(f"No sales found for the last {days} days.")
-
-    sorted_rows = sorted(totals.items(), key=lambda x: x[1], reverse=True)
-
-    msg = f"📊 {title} — {team}\n"
-    msg += f"🗓️ From: {cutoff.strftime('%b %d, %Y %I:%M %p')} (PH)\n"
-    msg += f"🗓️ To:   {now_ph().strftime('%b %d, %Y %I:%M %p')} (PH)\n\n"
-
-    for page, amt in sorted_rows:
-        goal = page_goals.get(page, 0)  # PAGE GOALS here
-        if goal:
-            pct = (amt / goal) * 100
-            msg += f"{get_color(pct)} {page}: ${amt:.2f} / ${goal:.2f} ({pct:.1f}%)\n"
-        else:
-            msg += f"⚪ {page}: ${amt:.2f} (no page goal)\n"
-
-    await update.message.reply_text(msg)
-
-async def quotahalf(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    return await quota_period(update, context, days=15, title="QUOTA HALF (15 DAYS)")
-
-async def quotamonth(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    return await quota_period(update, context, days=30, title="QUOTA MONTH (30 DAYS)")
-
-# -------------------------------------------------
-# GOAL COMMANDS
-# /setgoal = SHIFT GOALS (everyone can set if you want; change to admin-only if needed)
-# /pagegoal = PAGE GOALS (RESTRICTED)
-# /viewshiftgoals (RESTRICTED)
-# /viewpagegoals  (RESTRICTED)
-# /clearshiftgoals (RESTRICTED)
-# /clearpagegoals  (RESTRICTED)
+# GOALS
+# /setgoal = SHIFT GOALS (everyone can run)
+# /pagegoal, /viewshiftgoals, /viewpagegoals,
+# /quotahalf, /quotamonth, /clear* = BOT-ADMIN ONLY
 # -------------------------------------------------
 async def setgoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     team = await require_team(update)
@@ -733,9 +757,54 @@ async def clearpagegoals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🧹 Cleared all PAGE goals (15/30 days).")
 
 # -------------------------------------------------
-# OPTIONAL: admin tools (currently left as-is / not requested)
-# You can add back delete/edit/reset/undo if you still want.
+# QUOTAS (BOT-ADMIN ONLY)
 # -------------------------------------------------
+async def quota_period(update: Update, context: ContextTypes.DEFAULT_TYPE, days: int, title: str):
+    team = await require_team(update)
+    if team is None:
+        return
+    if not await require_registered_admin(update, min_level=1):
+        return
+
+    cutoff = now_ph() - timedelta(days=days)
+    totals = defaultdict(float)
+
+    for ev in sales_log:
+        try:
+            ev_team = split_internal(ev["user"])[1]
+            if ev_team != team:
+                continue
+            ev_dt = parse_ts(ev["ts"])
+            if ev_dt < cutoff:
+                continue
+            totals[ev["page"]] += float(ev["amt"])
+        except Exception:
+            continue
+
+    if not totals:
+        return await update.message.reply_text(f"No sales found for the last {days} days.")
+
+    sorted_rows = sorted(totals.items(), key=lambda x: x[1], reverse=True)
+
+    msg = f"📊 {title} — {team}\n"
+    msg += f"🗓️ From: {cutoff.strftime('%b %d, %Y %I:%M %p')} (PH)\n"
+    msg += f"🗓️ To:   {now_ph().strftime('%b %d, %Y %I:%M %p')} (PH)\n\n"
+
+    for page, amt in sorted_rows:
+        goal = page_goals.get(page, 0)
+        if goal:
+            pct = (amt / goal) * 100
+            msg += f"{get_color(pct)} {page}: ${amt:.2f} / ${goal:.2f} ({pct:.1f}%)\n"
+        else:
+            msg += f"⚪ {page}: ${amt:.2f} (no page goal)\n"
+
+    await update.message.reply_text(msg)
+
+async def quotahalf(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await quota_period(update, context, days=15, title="QUOTA HALF (15 DAYS)")
+
+async def quotamonth(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await quota_period(update, context, days=30, title="QUOTA MONTH (30 DAYS)")
 
 # -------------------------------------------------
 # START BOT
@@ -754,19 +823,24 @@ def main():
     # messages
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_sales))
 
-    # public/basic
+    # basic
     app.add_handler(CommandHandler("chatid", chatid))
-    app.add_handler(CommandHandler("registerteam", registerteam))
-    app.add_handler(CommandHandler("registeradmin", registeradmin))
 
-    # everyone
+    # owner-only
+    app.add_handler(CommandHandler("registerteam", registerteam))
+    app.add_handler(CommandHandler("unregisterteam", unregisterteam))
+    app.add_handler(CommandHandler("registeradmin", registeradmin))
+    app.add_handler(CommandHandler("unregisteradmin", unregisteradmin))
+    app.add_handler(CommandHandler("listadmins", listadmins))
+
+    # everyone (registered groups only)
     app.add_handler(CommandHandler("pages", pages))
     app.add_handler(CommandHandler("leaderboard", leaderboard))
     app.add_handler(CommandHandler("goalboard", goalboard))
     app.add_handler(CommandHandler("redpages", redpages))
     app.add_handler(CommandHandler("setgoal", setgoal))  # shift goals
 
-    # restricted (registered admins only)
+    # bot-admin only
     app.add_handler(CommandHandler("pagegoal", pagegoal))
     app.add_handler(CommandHandler("viewshiftgoals", viewshiftgoals))
     app.add_handler(CommandHandler("viewpagegoals", viewpagegoals))
