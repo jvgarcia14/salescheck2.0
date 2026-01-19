@@ -1,31 +1,6 @@
 # ==========================================
 #   ULTIMATE SALES + GOAL BOT (RAILWAY)
-#   - Shift-based /goalboard (auto “reset” by shift start time)
-#   - 15/30-day quotas: /quotahalf, /quotamonth
-#   - Tag-enforced pages (+100 #autumnpaid)
-#
-#   OWNER ONLY (USER ID = 5249363872):
-#     /registerteam Team 1
-#     /unregisterteam
-#     /registeradmin 1   (reply to user to register them)
-#     /unregisteradmin   (reply or /unregisteradmin <user_id>)
-#     /listadmins
-#
-#   EVERYONE (in registered team groups):
-#     Sales input: +amount #tag
-#     /pages, /leaderboard, /goalboard, /redpages, /setgoal (SHIFT GOALS)
-#
-#   BOT-ADMINS (level >= 1):
-#     /pagegoal (PERIOD GOALS for 15/30)
-#     /viewshiftgoals, /viewpagegoals
-#     /clearshiftgoals, /clearpagegoals
-#     /quotahalf, /quotamonth
-#     /editgoalboard PAGE AMOUNT   (replaces shift total AND quota total for that page)
-#     /editpagegoals PAGE AMOUNT   (replaces quota total only for that page)
-#
-#   NOTE:
-#   - /editgoalboard affects BOTH /goalboard and quotas (15/30) for that page.
-#   - /editpagegoals affects quotas (15/30) only.
+#   + MOBILE API (FastAPI) ADDED
 # ==========================================
 
 from telegram import Update
@@ -34,12 +9,19 @@ from telegram.ext import (
     ContextTypes, filters
 )
 from collections import defaultdict
-from datetime import datetime, timedelta, time
+from datetime import datetime, timedelta, time, date
 from zoneinfo import ZoneInfo
-import json, os
+import json, os, threading
+from typing import Optional, Dict, Any, List
+
+# ---------------------------
+# FASTAPI (for mobile app)
+# ---------------------------
+from fastapi import FastAPI, Header, HTTPException
+import uvicorn
 
 # -------------------------------------------------
-# OWNER (ONLY THIS USER CAN REGISTER TEAM + ADMINS)
+# OWNER
 # -------------------------------------------------
 OWNER_ID = 5513230302
 
@@ -51,12 +33,12 @@ PH_TZ = ZoneInfo("Asia/Manila")
 # -------------------------------------------------
 # FILES
 # -------------------------------------------------
-TEAMS_FILE = "teams.json"                    # chat_id -> team name
-ADMINS_FILE = "admins.json"                  # chat_id -> { user_id: level }
-GOALS_FILE = "goals.json"                    # {"shift_goals": {...}, "page_goals": {...}}
-SALES_FILE = "sales.json"                    # lifetime totals (optional display)
-SALES_LOG_FILE = "sales_log.json"            # event log
-MANUAL_OVERRIDES_FILE = "manual_overrides.json"  # {"shift": {...}, "page": {...}}
+TEAMS_FILE = "teams.json"
+ADMINS_FILE = "admins.json"
+GOALS_FILE = "goals.json"
+SALES_FILE = "sales.json"
+SALES_LOG_FILE = "sales_log.json"
+MANUAL_OVERRIDES_FILE = "manual_overrides.json"
 
 # -------------------------------------------------
 # DEFAULT TEAM MAP (optional)
@@ -67,29 +49,25 @@ DEFAULT_GROUP_TEAMS = {
 
 # -------------------------------------------------
 # PAGE TAGS (enforced)
-# Users must type: +200 #autumnpaid
 # -------------------------------------------------
 ALLOWED_PAGES = {
     "#autumnpaid": "AUTUMN PAID",
     "#autumnfree": "AUTUMN FREE",
-    # add more tags here...
 }
 
 # -------------------------------------------------
-# DATA STORAGE
+# DATA STORAGE (in-memory; persisted to JSON)
 # -------------------------------------------------
-GROUP_TEAMS = dict(DEFAULT_GROUP_TEAMS)      # chat_id -> team name
-CHAT_ADMINS = defaultdict(dict)              # chat_id -> {user_id: level}
+GROUP_TEAMS = dict(DEFAULT_GROUP_TEAMS)
+CHAT_ADMINS = defaultdict(dict)
 
-sales_data = defaultdict(lambda: defaultdict(float))  # lifetime totals (kept for compatibility)
-shift_goals = defaultdict(float)                      # SHIFT goals (for /goalboard, /redpages)
-page_goals = defaultdict(float)                       # PERIOD goals (for quotas)
-sales_log = []                                        # events: {"ts","user","page","amt"}
+sales_data = defaultdict(lambda: defaultdict(float))
+shift_goals = defaultdict(float)
+page_goals = defaultdict(float)
+sales_log = []
 
-# Manual replacement overrides:
-manual_shift_totals = defaultdict(float)              # replaces /goalboard totals per page
-manual_page_totals = defaultdict(float)               # replaces /quotahalf & /quotamonth totals per page
-
+manual_shift_totals = defaultdict(float)
+manual_page_totals = defaultdict(float)
 
 # -------------------------------------------------
 # UTIL
@@ -119,10 +97,6 @@ def split_internal(internal: str):
     return parts[0], parts[1]
 
 def normalize_page(raw_page: str):
-    """
-    Enforce pages via tags like #autumnpaid.
-    Takes FIRST token after amount.
-    """
     if not raw_page:
         return None
     token = raw_page.strip().split()[0].lower()
@@ -131,12 +105,6 @@ def normalize_page(raw_page: str):
     return ALLOWED_PAGES.get(token)
 
 def canonicalize_page_name(page_str: str) -> str | None:
-    """
-    Accept either:
-      - tag: "#autumnpaid"
-      - canonical page: "AUTUMN PAID"
-    Returns canonical page name string, or None if invalid tag.
-    """
     page_str = clean(page_str)
     if not page_str:
         return None
@@ -145,11 +113,6 @@ def canonicalize_page_name(page_str: str) -> str | None:
     return page_str
 
 def current_shift_label(dt: datetime) -> str:
-    """
-    Prime = 8am–4pm
-    Midshift = 4pm–12am
-    Closing = 12am–8am
-    """
     t = dt.timetz()
     if time(8, 0, tzinfo=PH_TZ) <= t < time(16, 0, tzinfo=PH_TZ):
         return "Prime (8AM–4PM)"
@@ -158,12 +121,6 @@ def current_shift_label(dt: datetime) -> str:
     return "Closing (12AM–8AM)"
 
 def shift_start(dt: datetime) -> datetime:
-    """
-    Reset points:
-      00:00 PH
-      08:00 PH
-      16:00 PH
-    """
     d = dt.date()
     t = dt.timetz()
 
@@ -181,28 +138,32 @@ def get_team(chat_id: int):
 def is_owner(update: Update) -> bool:
     return bool(update.effective_user) and update.effective_user.id == OWNER_ID
 
+# -------------------------------------------------
+# GOAL COLOR
+# -------------------------------------------------
+def get_color(p):
+    if p >= 100: return "💚"
+    if p >= 90: return "🟢"
+    if p >= 61: return "🔵"
+    if p >= 31: return "🟡"
+    if p >= 11: return "🟠"
+    return "🔴"
 
 # -------------------------------------------------
 # PERSISTENCE
 # -------------------------------------------------
+def save_json(path: str, obj: Any):
+    # simple safe write
+    tmp = f"{path}.tmp"
+    with open(tmp, "w") as f:
+        json.dump(obj, f)
+    os.replace(tmp, path)
+
 def save_all():
-    with open(SALES_FILE, "w") as f:
-        json.dump({u: dict(p) for u, p in sales_data.items()}, f)
-
-    with open(GOALS_FILE, "w") as f:
-        json.dump({
-            "shift_goals": dict(shift_goals),
-            "page_goals": dict(page_goals),
-        }, f)
-
-    with open(SALES_LOG_FILE, "w") as f:
-        json.dump(sales_log, f)
-
-    with open(MANUAL_OVERRIDES_FILE, "w") as f:
-        json.dump({
-            "shift": dict(manual_shift_totals),
-            "page": dict(manual_page_totals),
-        }, f)
+    save_json(SALES_FILE, {u: dict(p) for u, p in sales_data.items()})
+    save_json(GOALS_FILE, {"shift_goals": dict(shift_goals), "page_goals": dict(page_goals)})
+    save_json(SALES_LOG_FILE, sales_log)
+    save_json(MANUAL_OVERRIDES_FILE, {"shift": dict(manual_shift_totals), "page": dict(manual_page_totals)})
 
 def load_all():
     if os.path.exists(SALES_FILE):
@@ -215,7 +176,6 @@ def load_all():
     if os.path.exists(GOALS_FILE):
         with open(GOALS_FILE, "r") as f:
             raw = json.load(f)
-            # Backward compatible: old file might be {page: goal}
             if isinstance(raw, dict) and "shift_goals" in raw and "page_goals" in raw:
                 for page, goal in raw.get("shift_goals", {}).items():
                     shift_goals[page] = float(goal)
@@ -240,8 +200,7 @@ def load_all():
                 manual_page_totals[p] = float(v)
 
 def save_teams():
-    with open(TEAMS_FILE, "w") as f:
-        json.dump({str(k): v for k, v in GROUP_TEAMS.items()}, f)
+    save_json(TEAMS_FILE, {str(k): v for k, v in GROUP_TEAMS.items()})
 
 def load_teams():
     global GROUP_TEAMS
@@ -259,8 +218,7 @@ def save_admins():
     data = {}
     for chat_id, users in CHAT_ADMINS.items():
         data[str(chat_id)] = {str(uid): int(level) for uid, level in users.items()}
-    with open(ADMINS_FILE, "w") as f:
-        json.dump(data, f)
+    save_json(ADMINS_FILE, data)
 
 def load_admins():
     CHAT_ADMINS.clear()
@@ -279,7 +237,6 @@ def load_admins():
                                 CHAT_ADMINS[chat_id][int(uid_str)] = int(lvl)
                             except Exception:
                                 continue
-
 
 # -------------------------------------------------
 # ACCESS CONTROL
@@ -314,26 +271,12 @@ async def require_team(update: Update) -> str | None:
         return None
     return team
 
-
 # -------------------------------------------------
-# GOAL COLOR
-# -------------------------------------------------
-def get_color(p):
-    if p >= 100: return "💚"
-    if p >= 90: return "🟢"
-    if p >= 61: return "🔵"
-    if p >= 31: return "🟡"
-    if p >= 11: return "🟠"
-    return "🔴"
-
-
-# -------------------------------------------------
-# BASIC: /chatid (works anywhere)
+# BASIC: /chatid
 # -------------------------------------------------
 async def chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     await update.message.reply_text(f"Chat type: {chat.type}\nChat ID: {chat.id}")
-
 
 # -------------------------------------------------
 # OWNER ONLY: /registerteam Team 1
@@ -372,13 +315,11 @@ async def unregisterteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
     team = GROUP_TEAMS.pop(chat_id, None)
     save_teams()
 
-    # also remove bot-admins for that chat (optional)
     if chat_id in CHAT_ADMINS:
         del CHAT_ADMINS[chat_id]
         save_admins()
 
     await update.message.reply_text(f"🗑️ Team unregistered.\nRemoved team: {team}\nChat ID: {chat_id}")
-
 
 # -------------------------------------------------
 # OWNER ONLY: /registeradmin 1 (reply to user)
@@ -413,7 +354,7 @@ async def registeradmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Registered bot-admin: {name} (level {level})")
 
 # -------------------------------------------------
-# OWNER ONLY: /unregisteradmin (reply) or /unregisteradmin <user_id>
+# OWNER ONLY: /unregisteradmin
 # -------------------------------------------------
 async def unregisteradmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == "private":
@@ -467,7 +408,6 @@ async def listadmins(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("👑 Bot Admins (this group):\n\n" + "\n".join(lines))
 
-
 # -------------------------------------------------
 # SALES INPUT: +amount #tag
 # -------------------------------------------------
@@ -477,7 +417,7 @@ async def handle_sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     team = get_team(update.effective_chat.id)
     if team is None:
-        return  # ignore sales in unregistered groups
+        return
 
     user = update.message.from_user
     username = clean(user.username or user.first_name)
@@ -507,7 +447,6 @@ async def handle_sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
             unknown_tags.add(bad_token)
             continue
 
-        # record event
         sales_log.append({
             "ts": ts_iso,
             "user": internal,
@@ -515,7 +454,6 @@ async def handle_sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "amt": float(amount),
         })
 
-        # update lifetime totals
         sales_data[internal][canonical_page] = sales_data[internal].get(canonical_page, 0.0) + float(amount)
         saved = True
 
@@ -533,9 +471,8 @@ async def handle_sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{allowed}"
         )
 
-
 # -------------------------------------------------
-# /PAGES (everyone, team-only)
+# /PAGES
 # -------------------------------------------------
 async def pages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     team = await require_team(update)
@@ -548,9 +485,8 @@ async def pages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = [f"{tag} → {ALLOWED_PAGES[tag]}" for tag in sorted(ALLOWED_PAGES.keys())]
     await update.message.reply_text(f"📘 Approved Pages (use tags) — {team}\n\n" + "\n".join(lines))
 
-
 # -------------------------------------------------
-# /LEADERBOARD (everyone, lifetime)
+# /LEADERBOARD (lifetime)
 # -------------------------------------------------
 async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     team = await require_team(update)
@@ -575,9 +511,8 @@ async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"{i}. {u} ({p}) — ${a:.2f}\n"
     await update.message.reply_text(msg)
 
-
 # -------------------------------------------------
-# /SETGOAL (everyone, shift goals)
+# /SETGOAL (shift goals)
 # -------------------------------------------------
 async def setgoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     team = await require_team(update)
@@ -611,9 +546,8 @@ async def setgoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += "\n\n⚠️ Invalid:\n" + "\n".join(errors)
     await update.message.reply_text(msg)
 
-
 # -------------------------------------------------
-# /PAGEGOAL (bot-admin only, period goals)
+# /PAGEGOAL (period goals)
 # -------------------------------------------------
 async def pagegoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     team = await require_team(update)
@@ -649,9 +583,8 @@ async def pagegoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += "\n\n⚠️ Invalid:\n" + "\n".join(errors)
     await update.message.reply_text(msg)
 
-
 # -------------------------------------------------
-# VIEW/CLEAR GOALS (bot-admin only)
+# VIEW/CLEAR GOALS (bot-admin)
 # -------------------------------------------------
 async def viewshiftgoals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     team = await require_team(update)
@@ -705,10 +638,8 @@ async def clearpagegoals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_all()
     await update.message.reply_text("🧹 Cleared all PAGE goals (15/30 days).")
 
-
 # -------------------------------------------------
-# /GOALBOARD (everyone) - SHIFT sales vs SHIFT GOALS
-# Manual overrides: manual_shift_totals replaces totals per page.
+# /GOALBOARD (shift)
 # -------------------------------------------------
 async def goalboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     team = await require_team(update)
@@ -733,8 +664,6 @@ async def goalboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             continue
 
-    # Apply manual shift replacement totals (TEAM-wide). Display under a pseudo-user "MANUAL OVERRIDE"
-    # Also makes sure pages appear even if no sales.
     if manual_shift_totals:
         internal_manual = f"__MANUAL_OVERRIDE__|{team}"
         for page, val in manual_shift_totals.items():
@@ -748,7 +677,6 @@ async def goalboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "No sales yet for this shift."
         )
 
-    # Build display list
     data = []
     for internal, pages_map in per_user.items():
         uname, _ = split_internal(internal)
@@ -774,10 +702,8 @@ async def goalboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(msg)
 
-
 # -------------------------------------------------
-# /REDPAGES (everyone) - SHIFT pages below 31% of SHIFT GOALS
-# Uses manual_shift_totals if present for a page (replacement).
+# /REDPAGES
 # -------------------------------------------------
 async def redpages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     team = await require_team(update)
@@ -801,7 +727,6 @@ async def redpages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             continue
 
-    # apply replacement totals
     for page, val in manual_shift_totals.items():
         totals[page] = float(val)
 
@@ -824,10 +749,8 @@ async def redpages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(msg)
 
-
 # -------------------------------------------------
-# QUOTAS (bot-admin only)
-# Manual overrides: manual_page_totals replaces totals per page.
+# QUOTAS (15/30) - bot-admin
 # -------------------------------------------------
 async def quota_period(update: Update, context: ContextTypes.DEFAULT_TYPE, days: int, title: str):
     team = await require_team(update)
@@ -851,7 +774,6 @@ async def quota_period(update: Update, context: ContextTypes.DEFAULT_TYPE, days:
         except Exception:
             continue
 
-    # apply replacement totals (quota override)
     for page, val in manual_page_totals.items():
         totals[page] = float(val)
 
@@ -880,14 +802,8 @@ async def quotahalf(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def quotamonth(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await quota_period(update, context, days=30, title="QUOTA MONTH (30 DAYS)")
 
-
 # -------------------------------------------------
-# MANUAL REPLACEMENT EDITS (bot-admin only)
-# /editgoalboard PAGE AMOUNT:
-#   - replaces SHIFT total for PAGE
-#   - also sets quota total for PAGE to same amount
-# /editpagegoals PAGE AMOUNT:
-#   - replaces quota total for PAGE only
+# MANUAL REPLACEMENT EDITS (bot-admin)
 # -------------------------------------------------
 async def editgoalboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     team = await require_team(update)
@@ -914,7 +830,7 @@ async def editgoalboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("Amount must be a number. Example: /editgoalboard AUTUMN PAID 2000")
 
     manual_shift_totals[page] = amount
-    manual_page_totals[page] = amount  # your requested behavior
+    manual_page_totals[page] = amount
 
     save_all()
     await update.message.reply_text(
@@ -951,10 +867,228 @@ async def editpagegoals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_all()
     await update.message.reply_text(f"✅ Updated quotas\n{page} = ${amount:.2f} (15/30 days)")
 
+# =================================================
+#               MOBILE API SECTION
+# =================================================
+api = FastAPI()
 
-# -------------------------------------------------
+API_TOKEN = os.getenv("API_TOKEN")  # set in Railway Variables
+
+def require_api_token(auth: Optional[str]):
+    if not API_TOKEN:
+        # If you don't set API_TOKEN, the API is public (NOT recommended)
+        return
+    if not auth or not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing token")
+    token = auth.split(" ", 1)[1].strip()
+    if token != API_TOKEN:
+        raise HTTPException(status_code=403, detail="Invalid token")
+
+def read_sales_log_fresh() -> List[Dict[str, Any]]:
+    if os.path.exists(SALES_LOG_FILE):
+        try:
+            with open(SALES_LOG_FILE, "r") as f:
+                raw = json.load(f)
+                return raw if isinstance(raw, list) else []
+        except Exception:
+            return []
+    return []
+
+@api.get("/health")
+def health():
+    return {"ok": True}
+
+@api.get("/api/pages")
+def api_pages(authorization: Optional[str] = Header(default=None)):
+    require_api_token(authorization)
+    # return both tag and canonical name
+    return [{"tag": tag, "name": name} for tag, name in sorted(ALLOWED_PAGES.items())]
+
+@api.get("/api/teams")
+def api_teams(authorization: Optional[str] = Header(default=None)):
+    require_api_token(authorization)
+    teams = sorted(set(GROUP_TEAMS.values()))
+    return {"teams": teams}
+
+@api.get("/api/sales")
+def api_sales(
+    days: int = 15,
+    team: str = "",
+    page: str = "",
+    authorization: Optional[str] = Header(default=None)
+):
+    """
+    Daily totals for charts.
+    Optional: team="Team 1", page="AUTUMN PAID"
+    """
+    require_api_token(authorization)
+
+    if days < 1 or days > 365:
+        raise HTTPException(status_code=400, detail="days must be 1..365")
+
+    cutoff = now_ph() - timedelta(days=days - 1)
+    start_day = cutoff.astimezone(PH_TZ).date()
+
+    log = read_sales_log_fresh()
+    totals_by_day = defaultdict(float)
+
+    for ev in log:
+        try:
+            ev_dt = parse_ts(ev["ts"])
+            if ev_dt < cutoff:
+                continue
+
+            ev_user = ev.get("user", "")
+            _, ev_team = split_internal(ev_user)
+
+            if team and ev_team != team:
+                continue
+            if page and ev.get("page") != page:
+                continue
+
+            day_key = ev_dt.astimezone(PH_TZ).date().isoformat()
+            totals_by_day[day_key] += float(ev.get("amt", 0))
+        except Exception:
+            continue
+
+    points = []
+    for i in range(days):
+        d = start_day + timedelta(days=i)
+        ds = d.isoformat()
+        points.append({"date": ds, "sales": float(totals_by_day.get(ds, 0.0))})
+
+    return {
+        "rangeDays": days,
+        "team": team,
+        "page": page,
+        "timezone": "Asia/Manila",
+        "points": points,
+        "totalSales": sum(p["sales"] for p in points),
+    }
+
+@api.get("/api/leaderboard")
+def api_leaderboard(team: str, authorization: Optional[str] = Header(default=None)):
+    """
+    Lifetime leaderboard for one team.
+    """
+    require_api_token(authorization)
+
+    rows = []
+    for internal, pages_map in sales_data.items():
+        uname, uteam = split_internal(internal)
+        if uteam != team:
+            continue
+        for page, amt in pages_map.items():
+            rows.append({"user": uname, "page": page, "sales": float(amt)})
+
+    rows.sort(key=lambda x: x["sales"], reverse=True)
+    return {"team": team, "rows": rows}
+
+@api.get("/api/goalboard")
+def api_goalboard(team: str, authorization: Optional[str] = Header(default=None)):
+    """
+    Current SHIFT totals vs SHIFT GOALS, team-wide (not per-user).
+    Phone-friendly.
+    """
+    require_api_token(authorization)
+
+    now = now_ph()
+    start = shift_start(now)
+    label = current_shift_label(now)
+
+    totals = defaultdict(float)
+    log = read_sales_log_fresh()
+    for ev in log:
+        try:
+            ev_user = ev.get("user", "")
+            _, ev_team = split_internal(ev_user)
+            if ev_team != team:
+                continue
+            ev_dt = parse_ts(ev["ts"])
+            if ev_dt < start:
+                continue
+            totals[ev["page"]] += float(ev.get("amt", 0))
+        except Exception:
+            continue
+
+    # apply manual shift overrides
+    for p, v in manual_shift_totals.items():
+        totals[p] = float(v)
+
+    # include pages that have goals even if 0 sales
+    pages_set = set(totals.keys()) | set(shift_goals.keys())
+
+    rows = []
+    for p in sorted(pages_set):
+        goal = float(shift_goals.get(p, 0.0))
+        amt = float(totals.get(p, 0.0))
+        pct = (amt / goal * 100.0) if goal > 0 else 0.0
+        rows.append({"page": p, "sales": amt, "goal": goal, "pct": pct})
+
+    return {
+        "team": team,
+        "shiftLabel": label,
+        "shiftStartPH": start.isoformat(),
+        "rows": rows,
+    }
+
+@api.get("/api/quota")
+def api_quota(team: str, days: int = 15, authorization: Optional[str] = Header(default=None)):
+    """
+    15/30 day totals vs PAGE GOALS (period goals)
+    """
+    require_api_token(authorization)
+
+    if days not in (15, 30):
+        raise HTTPException(status_code=400, detail="days must be 15 or 30")
+
+    cutoff = now_ph() - timedelta(days=days)
+    totals = defaultdict(float)
+
+    log = read_sales_log_fresh()
+    for ev in log:
+        try:
+            ev_user = ev.get("user", "")
+            _, ev_team = split_internal(ev_user)
+            if ev_team != team:
+                continue
+            ev_dt = parse_ts(ev["ts"])
+            if ev_dt < cutoff:
+                continue
+            totals[ev["page"]] += float(ev.get("amt", 0))
+        except Exception:
+            continue
+
+    # apply manual quota overrides
+    for p, v in manual_page_totals.items():
+        totals[p] = float(v)
+
+    pages_set = set(totals.keys()) | set(page_goals.keys())
+    rows = []
+    for p in sorted(pages_set):
+        goal = float(page_goals.get(p, 0.0))
+        amt = float(totals.get(p, 0.0))
+        pct = (amt / goal * 100.0) if goal > 0 else 0.0
+        rows.append({"page": p, "sales": amt, "goal": goal, "pct": pct})
+
+    rows.sort(key=lambda r: r["sales"], reverse=True)
+
+    return {
+        "team": team,
+        "days": days,
+        "fromPH": cutoff.isoformat(),
+        "toPH": now_ph().isoformat(),
+        "rows": rows,
+    }
+
+def run_api_server():
+    # Railway gives PORT at runtime; keep 8000 as a safe default for local testing.
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run(api, host="0.0.0.0", port=port, log_level="info")
+
+# =================================================
 # START BOT
-# -------------------------------------------------
+# =================================================
 def main():
     load_all()
     load_teams()
@@ -963,6 +1097,10 @@ def main():
     BOT_TOKEN = os.getenv("BOT_TOKEN")
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN environment variable not set")
+
+    # Start FastAPI in background thread (so your phone app can connect)
+    t = threading.Thread(target=run_api_server, daemon=True)
+    t.start()
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
@@ -997,9 +1135,8 @@ def main():
     app.add_handler(CommandHandler("editgoalboard", editgoalboard))
     app.add_handler(CommandHandler("editpagegoals", editpagegoals))
 
-    print("BOT RUNNING…")
+    print("BOT + API RUNNING…")
     app.run_polling(close_loop=False)
 
 if __name__ == "__main__":
     main()
-
