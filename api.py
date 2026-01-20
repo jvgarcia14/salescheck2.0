@@ -11,10 +11,10 @@ def path(name: str) -> str:
     
 PH_TZ = ZoneInfo("Asia/Manila")
 
-SALES_LOG_FILE = "sales_log.json"
-TEAMS_FILE = "teams.json"
-MANUAL_OVERRIDES_FILE = "manual_overrides.json"
-GOALS_FILE = "goals.json"
+SALES_LOG_FILE = path("sales_log.json")
+TEAMS_FILE = path("teams.json")
+MANUAL_OVERRIDES_FILE = path("manual_overrides.json")
+GOALS_FILE = path("goals.json")
 
 app = FastAPI(title="Sales Bot API")
 
