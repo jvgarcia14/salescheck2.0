@@ -1,23 +1,20 @@
-from fastapi import FastAPI, HTTPException
+import os
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from collections import defaultdict
-import json, os
-import os
 
-DATA_DIR = os.getenv("DATA_DIR", "/app/data")
-
-def path(name: str) -> str:
-    os.makedirs(DATA_DIR, exist_ok=True)
-    return os.path.join(DATA_DIR, name)
 import psycopg2
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+
+PH_TZ = ZoneInfo("Asia/Manila")
+
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL not set")
 
 conn = psycopg2.connect(DATABASE_URL, sslmode="require")
 conn.autocommit = True
+
 
 def init_db():
     with conn.cursor() as cur:
@@ -28,89 +25,87 @@ def init_db():
         );
 
         CREATE TABLE IF NOT EXISTS sales (
-            team TEXT,
-            page TEXT,
-            amount NUMERIC,
+            chat_id BIGINT,
+            team TEXT NOT NULL,
+            page TEXT NOT NULL,
+            amount NUMERIC NOT NULL,
             ts TIMESTAMPTZ DEFAULT now()
         );
 
+        -- goals are per team + page (better than just page)
         CREATE TABLE IF NOT EXISTS page_goals (
-            page TEXT PRIMARY KEY,
-            goal NUMERIC
+            team TEXT NOT NULL,
+            page TEXT NOT NULL,
+            goal NUMERIC NOT NULL,
+            PRIMARY KEY (team, page)
         );
         """)
 
 
-app = FastAPI(title="Sales Bot API")
-
-init_db()  
-    
-PH_TZ = ZoneInfo("Asia/Manila")
-
-SALES_LOG_FILE = path("sales_log.json")
-TEAMS_FILE = path("teams.json")
-MANUAL_OVERRIDES_FILE = path("manual_overrides.json")
-GOALS_FILE = path("goals.json")
-def _load_json(path, default):
-    if not os.path.exists(path):
-        return default
-    try:
-        if os.path.getsize(path) == 0:
-            return default
-        with open(path, "r") as f:
-            return json.load(f)
-    except Exception:
-        return default
-
-def _split_internal(internal: str):
-    parts = internal.split("|", 1)
-    if len(parts) != 2:
-        return internal, ""
-    return parts[0], parts[1]
-
-def _now_ph():
+def now_ph():
     return datetime.now(PH_TZ)
+
+
+app = FastAPI(title="Sales Bot API")
+init_db()
+
 
 @app.get("/health")
 def health():
     return {"ok": True}
 
+
 @app.get("/teams")
 def teams():
-    teams_map = _load_json(TEAMS_FILE, {})
-    unique = sorted(set(str(v) for v in teams_map.values()))
-    return {"teams": unique}
+    # returns list of unique team names from DB
+    with conn.cursor() as cur:
+        cur.execute("SELECT DISTINCT name FROM teams ORDER BY name ASC;")
+        rows = cur.fetchall()
+    return {"teams": [r[0] for r in rows]}
+
 
 @app.get("/summary")
 def summary(days: int = 15, team: str = "Team 1"):
     if days not in (15, 30):
         raise HTTPException(status_code=400, detail="days must be 15 or 30")
 
-    log = _load_json(SALES_LOG_FILE, [])
-    overrides = _load_json(MANUAL_OVERRIDES_FILE, {"shift": {}, "page": {}})
-    goals_raw = _load_json(GOALS_FILE, {"shift_goals": {}, "page_goals": {}})
+    cutoff_ph = now_ph() - timedelta(days=days)
 
-    page_goals = goals_raw.get("page_goals", {})
+    # Convert cutoff to UTC-friendly timestamp by using aware PH time,
+    # psycopg2 will handle tz conversion correctly with TIMESTAMPTZ.
+    cutoff = cutoff_ph
 
-    cutoff = _now_ph() - timedelta(days=days)
-    totals = defaultdict(float)
+    # 1) Pull totals per page from sales
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT page, COALESCE(SUM(amount), 0) AS total
+            FROM sales
+            WHERE team = %s AND ts >= %s
+            GROUP BY page
+            ORDER BY total DESC;
+            """,
+            (team, cutoff),
+        )
+        sales_rows = cur.fetchall()
 
-    for ev in log:
-        try:
-            _, ev_team = _split_internal(ev["user"])
-            if ev_team != team:
-                continue
-            ts = datetime.fromisoformat(ev["ts"])
-            if ts < cutoff:
-                continue
-            totals[ev["page"]] += float(ev["amt"])
-        except Exception:
-            continue
+    totals = {page: float(total) for page, total in sales_rows}
 
-    # Apply quota overrides
-    for page, val in overrides.get("page", {}).items():
-        totals[page] = float(val)
+    # 2) Pull goals per page from page_goals
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT page, goal
+            FROM page_goals
+            WHERE team = %s;
+            """,
+            (team,),
+        )
+        goal_rows = cur.fetchall()
 
+    page_goals = {page: float(goal) for page, goal in goal_rows}
+
+    # 3) Combine
     all_pages = set(totals.keys()) | set(page_goals.keys())
     rows = []
     total_sales = 0.0
@@ -128,7 +123,7 @@ def summary(days: int = 15, team: str = "Team 1"):
             "page": page,
             "sales": round(sales, 2),
             "goal": round(goal, 2),
-            "pct": round(pct, 1) if pct is not None else None
+            "pct": round(pct, 1) if pct is not None else None,
         })
 
     rows.sort(key=lambda r: r["sales"], reverse=True)
@@ -137,10 +132,10 @@ def summary(days: int = 15, team: str = "Team 1"):
     return {
         "team": team,
         "days": days,
-        "from": cutoff.isoformat(),
-        "to": _now_ph().isoformat(),
+        "from": cutoff_ph.isoformat(),
+        "to": now_ph().isoformat(),
         "total_sales": round(total_sales, 2),
         "total_goal": round(total_goal, 2),
         "overall_pct": round(overall_pct, 1) if overall_pct is not None else None,
-        "rows": rows
+        "rows": rows,
     }
