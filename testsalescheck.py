@@ -14,6 +14,15 @@ from collections import defaultdict
 from datetime import datetime, timedelta, time
 from zoneinfo import ZoneInfo
 import json, os
+# ================================
+# SHARED DATA DIRECTORY (Railway Volume)
+# ================================
+DATA_DIR = os.getenv("DATA_DIR", "/app/data")
+
+def p(name: str) -> str:
+    os.makedirs(DATA_DIR, exist_ok=True)
+    return os.path.join(DATA_DIR, name)
+
 
 OWNER_ID = 5513230302
 PH_TZ = ZoneInfo("Asia/Manila")
@@ -842,4 +851,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
