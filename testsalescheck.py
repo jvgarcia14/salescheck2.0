@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, time
 from zoneinfo import ZoneInfo
 import json, os
 
-OWNER_ID = 5249363872
+OWNER_ID = 5513230302
 PH_TZ = ZoneInfo("Asia/Manila")
 
 TEAMS_FILE = "teams.json"
@@ -842,3 +842,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
