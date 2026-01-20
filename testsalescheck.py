@@ -33,9 +33,114 @@ db.autocommit = True
 
 # ----------------- PAGES -----------------
 ALLOWED_PAGES = {
-    "#autumnpaid": "AUTUMN PAID",
-    "#autumnfree": "AUTUMN FREE",
-    # add more tags here...
+    "#alannafreeoftv": "Alanna Free / OFTV",
+    "#alannapaid": "Alanna Paid",
+    "#alannawelcome": "Alanna Welcome",
+
+    "#alexis": "Alexis",
+
+    "#allyfree": "Ally Free",
+    "#allypaid": "Ally Paid",
+
+    "#aprilb": "April B",
+    "#ashley": "Ashley",
+
+    "#asiadollpaidfree": "Asia Doll Paid / Free",
+
+    "#autumnfree": "Autumn Free",
+    "#autumnpaid": "Autumn Paid",
+    "#autumnwelcome": "Autumn Welcome",
+
+    "#brifreeoftv": "Bri Free / OFTV",
+    "#bripaid": "Bri Paid",
+    "#briwelcome": "Bri Welcome",
+
+    "#brittanyamain": "Brittanya Main",
+    "#brittanyapaidfree": "Brittanya Paid / Free",
+
+    "#bronwinfree": "Bronwin Free",
+    "#bronwinoftvmcarteroftv": "Bronwin OFTV & MCarter OFTV",
+    "#bronwinpaid": "Bronwin Paid",
+    "#bronwinwelcome": "Bronwin Welcome",
+
+    "#carterpaidfree": "Carter Paid / Free",
+
+    "#christipaidfree": "Christi Paid and Free",
+
+    "#claire": "Claire",
+
+    "#cocofree": "Coco Free",
+    "#cocopaID": "Coco Paid",
+
+    "#cyndiecynthiacolby": "Cyndie, Cynthia & Colby",
+
+    "#dandfreeoftv": "Dan D Free / OFTV",
+    "#dandpaid": "Dan D Paid",
+    "#dandwelcome": "Dan D Welcome",
+
+    "#emilyraypaidfree": "Emily Ray Paid / Free",
+
+    "#essiepaidfree": "Essie Paid / Free",
+
+    "#gracefree": "Grace Free",
+
+    "#haileywfree": "Hailey W Free",
+    "#haileywpaid": "Hailey W Paid",
+
+    "#hazeyfree": "Hazey Free",
+    "#hazeypaid": "Hazey Paid",
+    "#hazeywelcome": "Hazey Welcome",
+
+    "#honeynoppv": "Honey NO PPV",
+    "#honeyvip": "Honey VIP",
+
+    "#isabellaxizziekay": "Isabella x Izzie Kay",
+
+    "#islafree": "Isla Free",
+    "#islaoftv": "Isla OFTV",
+    "#islapaid": "Isla Paid",
+    "#islawelcome": "Isla Welcome",
+
+    "#kayleexjasmyn": "Kaylee X Jasmyn",
+
+    "#kissingcousinsxvalerievip": "Kissing Cousins X Valerie VIP",
+
+    "#lexipaid": "Lexi Paid",
+
+    "#lilahfree": "Lilah Free",
+    "#lilahpaid": "Lilah Paid",
+
+    "#livv": "Livv",
+
+    "#mathildefree": "Mathilde Free",
+    "#mathildepaid": "Mathilde Paid",
+    "#mathildewelcome": "Mathilde Welcome",
+    "#mathildepaidxisaxalexalana": "Mathilde Paid x Isa A x Alexa Lana",
+
+    "#michellefree": "Michelle Free",
+    "#michellevip": "Michelle VIP",
+
+    "#mommycarter": "Mommy Carter",
+
+    "#natalialfree": "Natalia L Free",
+    "#natalialpaid": "Natalia L Paid",
+    "#natalialnicolefansly": "Natalia L, Nicole Fansly",
+
+    "#natalierfree": "Natalie R Free",
+    "#natalierpaid": "Natalie R Paid",
+
+    "#paris": "Paris",
+
+    "#popstfree": "Pops T Free",
+    "#popstpaid": "Pops T Paid",
+
+    "#rubirosefree": "Rubi Rose Free",
+    "#rubirosepaid": "Rubi Rose Paid",
+
+    "#salah": "Salah",
+    "#sarahc": "Sarah C",
+
+    "#skypaidfree": "Sky Paid / Free",
 }
 
 # ----------------- IN-MEM CACHE (loaded from DB) -----------------
@@ -926,3 +1031,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
