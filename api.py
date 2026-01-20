@@ -64,12 +64,13 @@ def health():
 
 @app.get("/teams")
 def teams():
-    # returns list of unique team names from DB
     with conn.cursor() as cur:
-        cur.execute("SELECT DISTINCT name FROM teams ORDER BY name ASC;")
+        cur.execute("SELECT DISTINCT name FROM teams ORDER BY name;")
         rows = cur.fetchall()
-    return {"teams": [r[0] for r in rows]}
 
+    return {
+        "teams": [r[0] for r in rows]
+    }
 
 @app.get("/summary")
 def summary(days: int = 15, team: str = "Team 1"):
