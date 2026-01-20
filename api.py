@@ -50,7 +50,13 @@ def now_ph():
 app = FastAPI(title="Sales Bot API")
 init_db()
 
-
+@app.get("/dbtest")
+def dbtest():
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1;")
+        row = cur.fetchone()
+    return {"db_ok": row[0] == 1}
+    
 @app.get("/health")
 def health():
     return {"ok": True}
