@@ -4,6 +4,12 @@ from zoneinfo import ZoneInfo
 from collections import defaultdict
 import json, os
 import os
+
+DATA_DIR = os.getenv("DATA_DIR", "/app/data")
+
+def path(name: str) -> str:
+    os.makedirs(DATA_DIR, exist_ok=True)
+    return os.path.join(DATA_DIR, name)
 import psycopg2
 from fastapi import FastAPI
 DATABASE_URL = os.getenv("DATABASE_URL")
