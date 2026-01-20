@@ -118,52 +118,96 @@ def is_owner(update: Update) -> bool:
     return bool(update.effective_user) and update.effective_user.id == OWNER_ID
 
 # -------------- PERSISTENCE --------------
+
+def _safe_load_json(path: str, default):
+    """Return parsed JSON or default if file missing/empty/bad."""
+    if not os.path.exists(path):
+        return default
+    try:
+        if os.path.getsize(path) == 0:
+            return default
+        with open(path, "r") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
 def save_all():
     with open(SALES_FILE, "w") as f:
         json.dump({u: dict(p) for u, p in sales_data.items()}, f)
 
     with open(GOALS_FILE, "w") as f:
-        json.dump({"shift_goals": dict(shift_goals), "page_goals": dict(page_goals)}, f)
+        json.dump(
+            {"shift_goals": dict(shift_goals), "page_goals": dict(page_goals)},
+            f
+        )
 
     with open(SALES_LOG_FILE, "w") as f:
-        json.dump(sales_log, f)
+        json.dump(list(sales_log), f)
 
     with open(MANUAL_OVERRIDES_FILE, "w") as f:
-        json.dump({"shift": dict(manual_shift_totals), "page": dict(manual_page_totals)}, f)
+        json.dump(
+            {"shift": dict(manual_shift_totals), "page": dict(manual_page_totals)},
+            f
+        )
 
 def load_all():
-    if os.path.exists(SALES_FILE):
-        with open(SALES_FILE, "r") as f:
-            raw = json.load(f)
-            for u, pages in raw.items():
-                for page, val in pages.items():
+    # --- SALES ---
+    raw_sales = _safe_load_json(SALES_FILE, {})
+    if isinstance(raw_sales, dict):
+        for u, pages in raw_sales.items():
+            if not isinstance(pages, dict):
+                continue
+            for page, val in pages.items():
+                try:
                     sales_data[u][page] = float(val)
+                except Exception:
+                    continue
 
-    if os.path.exists(GOALS_FILE):
-        with open(GOALS_FILE, "r") as f:
-            raw = json.load(f)
-            if isinstance(raw, dict) and "shift_goals" in raw and "page_goals" in raw:
-                for page, goal in raw.get("shift_goals", {}).items():
-                    shift_goals[page] = float(goal)
-                for page, goal in raw.get("page_goals", {}).items():
-                    page_goals[page] = float(goal)
-            else:
-                for page, goal in raw.items():
-                    page_goals[page] = float(goal)
+    # --- GOALS ---
+    raw_goals = _safe_load_json(GOALS_FILE, {})
+    if isinstance(raw_goals, dict) and "shift_goals" in raw_goals and "page_goals" in raw_goals:
+        # new format
+        for page, goal in (raw_goals.get("shift_goals") or {}).items():
+            try:
+                shift_goals[page] = float(goal)
+            except Exception:
+                continue
+        for page, goal in (raw_goals.get("page_goals") or {}).items():
+            try:
+                page_goals[page] = float(goal)
+            except Exception:
+                continue
+    elif isinstance(raw_goals, dict):
+        # old format fallback: treat everything as page goals
+        for page, goal in raw_goals.items():
+            try:
+                page_goals[page] = float(goal)
+            except Exception:
+                continue
 
-    if os.path.exists(SALES_LOG_FILE):
-        with open(SALES_LOG_FILE, "r") as f:
-            raw = json.load(f)
-            if isinstance(raw, list):
-                sales_log.extend(raw)
+    # --- SALES LOG ---
+    raw_log = _safe_load_json(SALES_LOG_FILE, [])
+    if isinstance(raw_log, list):
+        sales_log.clear()
+        sales_log.extend(raw_log)
 
-    if os.path.exists(MANUAL_OVERRIDES_FILE):
-        with open(MANUAL_OVERRIDES_FILE, "r") as f:
-            raw = json.load(f)
-            for p, v in raw.get("shift", {}).items():
-                manual_shift_totals[p] = float(v)
-            for p, v in raw.get("page", {}).items():
-                manual_page_totals[p] = float(v)
+    # --- MANUAL OVERRIDES ---
+    raw_over = _safe_load_json(MANUAL_OVERRIDES_FILE, {"shift": {}, "page": {}})
+    if not isinstance(raw_over, dict):
+        raw_over = {"shift": {}, "page": {}}
+
+    for page, val in (raw_over.get("shift") or {}).items():
+        try:
+            manual_shift_totals[page] = float(val)
+        except Exception:
+            continue
+
+    for page, val in (raw_over.get("page") or {}).items():
+        try:
+            manual_page_totals[page] = float(val)
+        except Exception:
+            continue
+
 
 def save_teams():
     with open(TEAMS_FILE, "w") as f:
@@ -172,39 +216,46 @@ def save_teams():
 def load_teams():
     global GROUP_TEAMS
     GROUP_TEAMS = dict(DEFAULT_GROUP_TEAMS)
-    if os.path.exists(TEAMS_FILE):
-        with open(TEAMS_FILE, "r") as f:
-            raw = json.load(f)
-            for k, v in raw.items():
-                try:
-                    GROUP_TEAMS[int(k)] = str(v)
-                except Exception:
-                    continue
+
+    raw = _safe_load_json(TEAMS_FILE, {})
+    if isinstance(raw, dict):
+        for k, v in raw.items():
+            try:
+                GROUP_TEAMS[int(k)] = str(v)
+            except Exception:
+                continue
+
 
 def save_admins():
     data = {}
     for chat_id, users in CHAT_ADMINS.items():
-        data[str(chat_id)] = {str(uid): int(level) for uid, level in users.items()}
+        # users should be dict-like: {user_id: level}
+        data[str(chat_id)] = {str(uid): int(level) for uid, level in dict(users).items()}
+
     with open(ADMINS_FILE, "w") as f:
         json.dump(data, f)
 
 def load_admins():
     CHAT_ADMINS.clear()
-    if os.path.exists(ADMINS_FILE):
-        with open(ADMINS_FILE, "r") as f:
-            raw = json.load(f)
-            if isinstance(raw, dict):
-                for chat_id_str, users in raw.items():
-                    try:
-                        chat_id = int(chat_id_str)
-                    except Exception:
-                        continue
-                    if isinstance(users, dict):
-                        for uid_str, lvl in users.items():
-                            try:
-                                CHAT_ADMINS[chat_id][int(uid_str)] = int(lvl)
-                            except Exception:
-                                continue
+
+    raw = _safe_load_json(ADMINS_FILE, {})
+    if not isinstance(raw, dict):
+        return
+
+    for chat_id_str, users in raw.items():
+        try:
+            chat_id = int(chat_id_str)
+        except Exception:
+            continue
+        if not isinstance(users, dict):
+            continue
+
+        for uid_str, lvl in users.items():
+            try:
+                CHAT_ADMINS[chat_id][int(uid_str)] = int(lvl)
+            except Exception:
+                continue
+
 
 # -------------- ACCESS CONTROL --------------
 async def require_owner(update: Update) -> bool:
@@ -851,6 +902,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
