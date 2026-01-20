@@ -351,6 +351,10 @@ async def registerteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     GROUP_TEAMS[chat_id] = team_name
     save_teams()
+    GROUP_TEAMS[chat_id] = team_name
+    save_teams()
+
+db_register_team(chat_id, team_name)   # ✅ ADD THIS LINE
     await update.message.reply_text(f"✅ Registered this group!\nTeam: {team_name}\nChat ID: {chat_id}\nNext: /registeradmin 1")
 
 async def unregisterteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -942,6 +946,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
