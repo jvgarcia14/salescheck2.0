@@ -35,15 +35,20 @@ def init_db():
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            # DANGER: wipes old tables
+            cur.execute("DROP TABLE IF EXISTS sales;")
+            cur.execute("DROP TABLE IF EXISTS page_goals;")
+            cur.execute("DROP TABLE IF EXISTS teams;")
+
             cur.execute("""
-            CREATE TABLE IF NOT EXISTS teams (
+            CREATE TABLE teams (
                 chat_id BIGINT PRIMARY KEY,
                 name TEXT NOT NULL
             );
             """)
 
             cur.execute("""
-            CREATE TABLE IF NOT EXISTS sales (
+            CREATE TABLE sales (
                 chat_id BIGINT,
                 team TEXT NOT NULL,
                 page TEXT NOT NULL,
@@ -53,7 +58,7 @@ def init_db():
             """)
 
             cur.execute("""
-            CREATE TABLE IF NOT EXISTS page_goals (
+            CREATE TABLE page_goals (
                 team TEXT NOT NULL,
                 page TEXT NOT NULL,
                 goal NUMERIC NOT NULL,
@@ -61,12 +66,13 @@ def init_db():
             );
             """)
 
-            # Helpful indexes for summary queries
-            cur.execute("""CREATE INDEX IF NOT EXISTS idx_sales_team_ts ON sales(team, ts);""")
-            cur.execute("""CREATE INDEX IF NOT EXISTS idx_sales_team_page ON sales(team, page);""")
+            cur.execute("""CREATE INDEX idx_sales_team_ts ON sales(team, ts);""")
+            cur.execute("""CREATE INDEX idx_sales_team_page ON sales(team, page);""")
+
         conn.commit()
     finally:
         put_conn(conn)
+
 
 app = FastAPI(title="Sales Bot API")
 init_db()
