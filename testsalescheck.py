@@ -33,7 +33,7 @@ def db_register_team(chat_id: int, team_name: str):
         )
 
 def init_db():
-    with conn.cursor() as cur:
+    with db.cursor() as cur:
         cur.execute("""
         CREATE TABLE IF NOT EXISTS teams (
             chat_id BIGINT PRIMARY KEY,
@@ -953,6 +953,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
