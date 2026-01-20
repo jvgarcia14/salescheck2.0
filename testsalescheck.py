@@ -1,8 +1,8 @@
 # ==========================================
-#   ULTIMATE SALES + GOAL BOT (RAILWAY)
-#   + Single-page override clearing:
-#     /cleargoalboardoverride <page>
-#     /clearpageoverride <page>
+#   ULTIMATE SALES + GOAL BOT (RAILWAY) - DB VERSION
+#   - Saves sales/goals/admins/teams/overrides to Postgres
+#   - Loads everything from DB on startup
+#   - /summary will now show correct totals (because sales are in DB)
 # ==========================================
 
 from telegram import Update
@@ -13,87 +13,42 @@ from telegram.ext import (
 from collections import defaultdict
 from datetime import datetime, timedelta, time
 from zoneinfo import ZoneInfo
-import json, os
-import psycopg2, os
+import os
+import psycopg2
+
+# ----------------- CONFIG -----------------
+OWNER_ID = 5513230302
+PH_TZ = ZoneInfo("Asia/Manila")
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL not set")
 
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN environment variable not set")
+
 db = psycopg2.connect(DATABASE_URL, sslmode="require")
 db.autocommit = True
 
-def db_register_team(chat_id: int, team_name: str):
-    with db.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO teams (chat_id, name)
-            VALUES (%s, %s)
-            ON CONFLICT (chat_id)
-            DO UPDATE SET name = EXCLUDED.name;
-            """,
-            (chat_id, team_name)
-        )
-
-def init_db():
-    with db.cursor() as cur:
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS teams (
-            chat_id BIGINT PRIMARY KEY,
-            name TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS sales (
-            team TEXT,
-            page TEXT,
-            amount NUMERIC,
-            ts TIMESTAMPTZ DEFAULT now()
-        );
-
-        CREATE TABLE IF NOT EXISTS page_goals (
-            page TEXT PRIMARY KEY,
-            goal NUMERIC
-        );
-        """)
-
-# ================================
-# SHARED DATA DIRECTORY (Railway Volume)
-# ================================
-DATA_DIR = os.getenv("DATA_DIR", "/app/data")
-
-def p(name: str) -> str:
-    os.makedirs(DATA_DIR, exist_ok=True)
-    return os.path.join(DATA_DIR, name)
-
-
-OWNER_ID = 5513230302
-PH_TZ = ZoneInfo("Asia/Manila")
-
-TEAMS_FILE = p("teams.json")
-ADMINS_FILE = p("admins.json")
-GOALS_FILE = p("goals.json")
-SALES_FILE = p("sales.json")
-SALES_LOG_FILE = p("sales_log.json")
-MANUAL_OVERRIDES_FILE = p("manual_overrides.json")
-
-DEFAULT_GROUP_TEAMS = {}
-
+# ----------------- PAGES -----------------
 ALLOWED_PAGES = {
     "#autumnpaid": "AUTUMN PAID",
     "#autumnfree": "AUTUMN FREE",
     # add more tags here...
 }
 
-GROUP_TEAMS = dict(DEFAULT_GROUP_TEAMS)
-CHAT_ADMINS = defaultdict(dict)
+# ----------------- IN-MEM CACHE (loaded from DB) -----------------
+GROUP_TEAMS = {}  # chat_id -> team name
+CHAT_ADMINS = defaultdict(dict)  # chat_id -> {user_id: level}
 
-sales_data = defaultdict(lambda: defaultdict(float))
-shift_goals = defaultdict(float)
-page_goals = defaultdict(float)
-sales_log = []
+# goals
+shift_goals = defaultdict(float)  # page -> goal
+page_goals = defaultdict(float)   # page -> goal
 
-manual_shift_totals = defaultdict(float)
-manual_page_totals = defaultdict(float)
+# manual overrides
+manual_shift_totals = defaultdict(float)  # page -> override amount
+manual_page_totals = defaultdict(float)   # page -> override amount
 
 # ---------------- UTIL ----------------
 def clean(text: str):
@@ -128,7 +83,7 @@ def normalize_page(raw_page: str):
         return None
     return ALLOWED_PAGES.get(token)
 
-def canonicalize_page_name(page_str: str) -> str | None:
+def canonicalize_page_name(page_str: str):
     page_str = clean(page_str)
     if not page_str:
         return None
@@ -159,147 +114,185 @@ def get_team(chat_id: int):
 def is_owner(update: Update) -> bool:
     return bool(update.effective_user) and update.effective_user.id == OWNER_ID
 
-# -------------- PERSISTENCE --------------
+def get_color(p):
+    if p >= 100: return "💚"
+    if p >= 90: return "🟢"
+    if p >= 61: return "🔵"
+    if p >= 31: return "🟡"
+    if p >= 11: return "🟠"
+    return "🔴"
 
-def _safe_load_json(path: str, default):
-    """Return parsed JSON or default if file missing/empty/bad."""
-    if not os.path.exists(path):
-        return default
-    try:
-        if os.path.getsize(path) == 0:
-            return default
-        with open(path, "r") as f:
-            return json.load(f)
-    except Exception:
-        return default
+# ----------------- DB SCHEMA + HELPERS -----------------
+def init_db():
+    with db.cursor() as cur:
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS teams (
+            chat_id BIGINT PRIMARY KEY,
+            name TEXT NOT NULL
+        );
 
-def save_all():
-    with open(SALES_FILE, "w") as f:
-        json.dump({u: dict(p) for u, p in sales_data.items()}, f)
+        CREATE TABLE IF NOT EXISTS admins (
+            chat_id BIGINT NOT NULL,
+            user_id BIGINT NOT NULL,
+            level INT NOT NULL DEFAULT 1,
+            PRIMARY KEY (chat_id, user_id)
+        );
 
-    with open(GOALS_FILE, "w") as f:
-        json.dump(
-            {"shift_goals": dict(shift_goals), "page_goals": dict(page_goals)},
-            f
+        CREATE TABLE IF NOT EXISTS sales (
+            id BIGSERIAL PRIMARY KEY,
+            team TEXT NOT NULL,
+            page TEXT NOT NULL,
+            amount NUMERIC NOT NULL,
+            ts TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+
+        CREATE TABLE IF NOT EXISTS page_goals (
+            page TEXT PRIMARY KEY,
+            goal NUMERIC NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS shift_goals (
+            page TEXT PRIMARY KEY,
+            goal NUMERIC NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS manual_overrides (
+            page TEXT PRIMARY KEY,
+            shift_total NUMERIC NOT NULL DEFAULT 0,
+            page_total  NUMERIC NOT NULL DEFAULT 0
+        );
+        """)
+
+def db_register_team(chat_id: int, team_name: str):
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO teams (chat_id, name)
+            VALUES (%s, %s)
+            ON CONFLICT (chat_id)
+            DO UPDATE SET name = EXCLUDED.name;
+            """,
+            (chat_id, team_name)
         )
 
-    with open(SALES_LOG_FILE, "w") as f:
-        json.dump(list(sales_log), f)
+def db_delete_team(chat_id: int):
+    with db.cursor() as cur:
+        cur.execute("DELETE FROM teams WHERE chat_id=%s", (chat_id,))
+        cur.execute("DELETE FROM admins WHERE chat_id=%s", (chat_id,))
 
-    with open(MANUAL_OVERRIDES_FILE, "w") as f:
-        json.dump(
-            {"shift": dict(manual_shift_totals), "page": dict(manual_page_totals)},
-            f
+def db_upsert_admin(chat_id: int, user_id: int, level: int):
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO admins (chat_id, user_id, level)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (chat_id, user_id)
+            DO UPDATE SET level = EXCLUDED.level;
+            """,
+            (chat_id, user_id, level)
         )
 
-def load_all():
-    # --- SALES ---
-    raw_sales = _safe_load_json(SALES_FILE, {})
-    if isinstance(raw_sales, dict):
-        for u, pages in raw_sales.items():
-            if not isinstance(pages, dict):
-                continue
-            for page, val in pages.items():
-                try:
-                    sales_data[u][page] = float(val)
-                except Exception:
-                    continue
+def db_delete_admin(chat_id: int, user_id: int):
+    with db.cursor() as cur:
+        cur.execute("DELETE FROM admins WHERE chat_id=%s AND user_id=%s", (chat_id, user_id))
 
-    # --- GOALS ---
-    raw_goals = _safe_load_json(GOALS_FILE, {})
-    if isinstance(raw_goals, dict) and "shift_goals" in raw_goals and "page_goals" in raw_goals:
-        # new format
-        for page, goal in (raw_goals.get("shift_goals") or {}).items():
-            try:
-                shift_goals[page] = float(goal)
-            except Exception:
-                continue
-        for page, goal in (raw_goals.get("page_goals") or {}).items():
-            try:
-                page_goals[page] = float(goal)
-            except Exception:
-                continue
-    elif isinstance(raw_goals, dict):
-        # old format fallback: treat everything as page goals
-        for page, goal in raw_goals.items():
-            try:
-                page_goals[page] = float(goal)
-            except Exception:
-                continue
+def db_add_sale(team: str, page: str, amount: float, ts_iso: str):
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO sales (team, page, amount, ts) VALUES (%s, %s, %s, %s)",
+            (team, page, amount, ts_iso)
+        )
 
-    # --- SALES LOG ---
-    raw_log = _safe_load_json(SALES_LOG_FILE, [])
-    if isinstance(raw_log, list):
-        sales_log.clear()
-        sales_log.extend(raw_log)
+def db_upsert_page_goal(page: str, goal: float):
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO page_goals (page, goal)
+            VALUES (%s, %s)
+            ON CONFLICT (page)
+            DO UPDATE SET goal = EXCLUDED.goal;
+            """,
+            (page, goal)
+        )
 
-    # --- MANUAL OVERRIDES ---
-    raw_over = _safe_load_json(MANUAL_OVERRIDES_FILE, {"shift": {}, "page": {}})
-    if not isinstance(raw_over, dict):
-        raw_over = {"shift": {}, "page": {}}
+def db_upsert_shift_goal(page: str, goal: float):
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO shift_goals (page, goal)
+            VALUES (%s, %s)
+            ON CONFLICT (page)
+            DO UPDATE SET goal = EXCLUDED.goal;
+            """,
+            (page, goal)
+        )
 
-    for page, val in (raw_over.get("shift") or {}).items():
-        try:
-            manual_shift_totals[page] = float(val)
-        except Exception:
-            continue
+def db_clear_page_goals():
+    with db.cursor() as cur:
+        cur.execute("DELETE FROM page_goals")
 
-    for page, val in (raw_over.get("page") or {}).items():
-        try:
-            manual_page_totals[page] = float(val)
-        except Exception:
-            continue
+def db_clear_shift_goals():
+    with db.cursor() as cur:
+        cur.execute("DELETE FROM shift_goals")
 
+def db_upsert_override(page: str, shift_total: float | None = None, page_total: float | None = None):
+    # upsert then set columns provided
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO manual_overrides (page, shift_total, page_total) VALUES (%s, 0, 0) ON CONFLICT (page) DO NOTHING",
+            (page,)
+        )
+        if shift_total is not None:
+            cur.execute("UPDATE manual_overrides SET shift_total=%s WHERE page=%s", (shift_total, page))
+        if page_total is not None:
+            cur.execute("UPDATE manual_overrides SET page_total=%s WHERE page=%s", (page_total, page))
 
-def save_teams():
-    with open(TEAMS_FILE, "w") as f:
-        json.dump({str(k): v for k, v in GROUP_TEAMS.items()}, f)
+def db_clear_override_shift(page: str):
+    with db.cursor() as cur:
+        cur.execute("UPDATE manual_overrides SET shift_total=0 WHERE page=%s", (page,))
+        cur.execute("DELETE FROM manual_overrides WHERE page=%s AND shift_total=0 AND page_total=0", (page,))
 
-def load_teams():
-    global GROUP_TEAMS
-    GROUP_TEAMS = dict(DEFAULT_GROUP_TEAMS)
+def db_clear_override_page(page: str):
+    with db.cursor() as cur:
+        cur.execute("UPDATE manual_overrides SET page_total=0 WHERE page=%s", (page,))
+        cur.execute("DELETE FROM manual_overrides WHERE page=%s AND shift_total=0 AND page_total=0", (page,))
 
-    raw = _safe_load_json(TEAMS_FILE, {})
-    if isinstance(raw, dict):
-        for k, v in raw.items():
-            try:
-                GROUP_TEAMS[int(k)] = str(v)
-            except Exception:
-                continue
-
-
-def save_admins():
-    data = {}
-    for chat_id, users in CHAT_ADMINS.items():
-        # users should be dict-like: {user_id: level}
-        data[str(chat_id)] = {str(uid): int(level) for uid, level in dict(users).items()}
-
-    with open(ADMINS_FILE, "w") as f:
-        json.dump(data, f)
-
-def load_admins():
+def load_from_db():
+    GROUP_TEAMS.clear()
     CHAT_ADMINS.clear()
+    shift_goals.clear()
+    page_goals.clear()
+    manual_shift_totals.clear()
+    manual_page_totals.clear()
 
-    raw = _safe_load_json(ADMINS_FILE, {})
-    if not isinstance(raw, dict):
-        return
+    with db.cursor() as cur:
+        # teams
+        cur.execute("SELECT chat_id, name FROM teams")
+        for chat_id, name in cur.fetchall():
+            GROUP_TEAMS[int(chat_id)] = str(name)
 
-    for chat_id_str, users in raw.items():
-        try:
-            chat_id = int(chat_id_str)
-        except Exception:
-            continue
-        if not isinstance(users, dict):
-            continue
+        # admins
+        cur.execute("SELECT chat_id, user_id, level FROM admins")
+        for chat_id, user_id, level in cur.fetchall():
+            CHAT_ADMINS[int(chat_id)][int(user_id)] = int(level)
 
-        for uid_str, lvl in users.items():
-            try:
-                CHAT_ADMINS[chat_id][int(uid_str)] = int(lvl)
-            except Exception:
-                continue
+        # goals
+        cur.execute("SELECT page, goal FROM shift_goals")
+        for page, goal in cur.fetchall():
+            shift_goals[str(page)] = float(goal)
 
+        cur.execute("SELECT page, goal FROM page_goals")
+        for page, goal in cur.fetchall():
+            page_goals[str(page)] = float(goal)
 
-# -------------- ACCESS CONTROL --------------
+        # overrides
+        cur.execute("SELECT page, shift_total, page_total FROM manual_overrides")
+        for page, s, p in cur.fetchall():
+            page = str(page)
+            manual_shift_totals[page] = float(s)
+            manual_page_totals[page] = float(p)
+
+# ----------------- ACCESS CONTROL -----------------
 async def require_owner(update: Update) -> bool:
     if not is_owner(update):
         await update.message.reply_text("⛔ Only the bot owner can use this command.")
@@ -317,7 +310,7 @@ async def require_registered_admin(update: Update, min_level: int = 1) -> bool:
         return False
     return True
 
-async def require_team(update: Update) -> str | None:
+async def require_team(update: Update):
     team = get_team(update.effective_chat.id)
     if team is None:
         await update.message.reply_text(
@@ -326,22 +319,12 @@ async def require_team(update: Update) -> str | None:
         return None
     return team
 
-# -------------- COLORS --------------
-def get_color(p):
-    if p >= 100: return "💚"
-    if p >= 90: return "🟢"
-    if p >= 61: return "🔵"
-    if p >= 31: return "🟡"
-    if p >= 11: return "🟠"
-    return "🔴"
-
-# -------------- BASIC --------------
+# ----------------- BASIC -----------------
 async def chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     await update.message.reply_text(f"Chat type: {chat.type}\nChat ID: {chat.id}")
 
-# -------------- OWNER ONLY: TEAM + ADMINS --------------
-# -------------- OWNER ONLY: TEAM + ADMINS --------------
+# ----------------- OWNER COMMANDS -----------------
 async def registerteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == "private":
         return await update.message.reply_text("Run this command inside the team group (not in private).")
@@ -355,17 +338,12 @@ async def registerteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_id = update.effective_chat.id
 
-    # keep your existing JSON behavior
     GROUP_TEAMS[chat_id] = team_name
-    save_teams()
-
-    # ✅ add DB write (ONLY this extra line)
     db_register_team(chat_id, team_name)
 
     return await update.message.reply_text(
         f"✅ Registered this group!\nTeam: {team_name}\nChat ID: {chat_id}\nNext: /registeradmin 1"
     )
-
 
 async def unregisterteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == "private":
@@ -378,12 +356,10 @@ async def unregisterteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("This group is not registered.")
 
     team = GROUP_TEAMS.pop(chat_id, None)
-    save_teams()
-
     if chat_id in CHAT_ADMINS:
         del CHAT_ADMINS[chat_id]
-        save_admins()
 
+    db_delete_team(chat_id)
     await update.message.reply_text(f"🗑️ Team unregistered.\nRemoved team: {team}\nChat ID: {chat_id}")
 
 async def registeradmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -407,7 +383,7 @@ async def registeradmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_user = update.effective_user
 
     CHAT_ADMINS[chat_id][target_user.id] = level
-    save_admins()
+    db_upsert_admin(chat_id, target_user.id, level)
 
     name = clean(target_user.username or target_user.first_name or str(target_user.id))
     await update.message.reply_text(f"✅ Registered bot-admin: {name} (level {level})")
@@ -439,7 +415,7 @@ async def unregisteradmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("That user is not a bot-admin in this group.")
 
     del CHAT_ADMINS[chat_id][target_id]
-    save_admins()
+    db_delete_admin(chat_id, target_id)
     await update.message.reply_text(f"🗑️ Removed bot-admin access for: {target_label}")
 
 async def listadmins(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -458,7 +434,7 @@ async def listadmins(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"• User ID: {uid} — level {int(lvl)}")
     await update.message.reply_text("👑 Bot Admins (this group):\n\n" + "\n".join(lines))
 
-# -------------- SALES --------------
+# ----------------- SALES HANDLER -----------------
 async def handle_sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
@@ -495,12 +471,11 @@ async def handle_sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
             unknown_tags.add(bad_token)
             continue
 
-        sales_log.append({"ts": ts_iso, "user": internal, "page": canonical_page, "amt": float(amount)})
-        sales_data[internal][canonical_page] = sales_data[internal].get(canonical_page, 0.0) + float(amount)
+        # ✅ SAVE TO DB (this is what fixes /summary)
+        db_add_sale(team, canonical_page, float(amount), ts_iso)
         saved = True
 
     if saved:
-        save_all()
         await update.message.reply_text("✅ Sale recorded")
 
     if unknown_tags:
@@ -511,7 +486,7 @@ async def handle_sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{bad}\n\nUse ONLY these approved tags:\n{allowed}"
         )
 
-# -------------- DISPLAY COMMANDS (everyone) --------------
+# ----------------- DISPLAY COMMANDS -----------------
 async def pages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     team = await require_team(update)
     if team is None:
@@ -524,22 +499,25 @@ async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if team is None:
         return
 
-    rows = []
-    for internal, pages_map in sales_data.items():
-        uname, uteam = split_internal(internal)
-        if uteam != team:
-            continue
-        for page, amt in pages_map.items():
-            rows.append((uname, page, amt))
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            SELECT page, SUM(amount) as total
+            FROM sales
+            WHERE team=%s
+            GROUP BY page
+            ORDER BY total DESC
+            """,
+            (team,)
+        )
+        rows = cur.fetchall()
 
     if not rows:
         return await update.message.reply_text("No sales yet.")
 
-    rows.sort(key=lambda x: x[2], reverse=True)
-
-    msg = f"🏆 SALES LEADERBOARD (LIFETIME) — {team}\n\n"
-    for i, (u, p, a) in enumerate(rows, 1):
-        msg += f"{i}. {u} ({p}) — ${a:.2f}\n"
+    msg = f"🏆 SALES LEADERBOARD (LIFETIME by Page) — {team}\n\n"
+    for i, (page, total) in enumerate(rows, 1):
+        msg += f"{i}. {page} — ${float(total):.2f}\n"
     await update.message.reply_text(msg)
 
 async def setgoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -564,9 +542,9 @@ async def setgoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         page = clean(" ".join(parts[:-1]))
         shift_goals[page] = goal
+        db_upsert_shift_goal(page, goal)
         results.append(f"✓ {page} = ${goal:.2f}")
 
-    save_all()
     msg = "🎯 Shift Goals Updated:\n" + ("\n".join(results) if results else "(no valid entries)")
     if errors:
         msg += "\n\n⚠️ Invalid:\n" + "\n".join(errors)
@@ -581,48 +559,41 @@ async def goalboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     start = shift_start(now)
     label = current_shift_label(now)
 
-    per_user = defaultdict(lambda: defaultdict(float))
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            SELECT page, SUM(amount) AS total
+            FROM sales
+            WHERE team=%s AND ts >= %s
+            GROUP BY page
+            """,
+            (team, start)
+        )
+        rows = cur.fetchall()
 
-    for ev in sales_log:
-        try:
-            ev_team = split_internal(ev["user"])[1]
-            if ev_team != team:
-                continue
-            ev_dt = parse_ts(ev["ts"])
-            if ev_dt < start:
-                continue
-            per_user[ev["user"]][ev["page"]] += float(ev["amt"])
-        except Exception:
-            continue
+    # apply shift overrides if set (non-zero)
+    totals = defaultdict(float)
+    for page, total in rows:
+        totals[str(page)] += float(total)
 
-    if manual_shift_totals:
-        internal_manual = f"__MANUAL_OVERRIDE__|{team}"
-        for page, val in manual_shift_totals.items():
-            per_user[internal_manual][page] = float(val)
+    for page, val in manual_shift_totals.items():
+        if float(val) != 0:
+            totals[page] = float(val)
 
-    if not per_user:
+    if not totals:
         return await update.message.reply_text(
             f"🎯 GOAL PROGRESS — {team}\n🕒 Shift: {label}\n✅ Shift started: {start.strftime('%b %d, %Y %I:%M %p')} (PH)\n\nNo sales yet for this shift."
         )
 
-    data = []
-    for internal, pages_map in per_user.items():
-        uname, _ = split_internal(internal)
-        total = sum(pages_map.values())
-        data.append((uname, pages_map, total))
-    data.sort(key=lambda x: x[2], reverse=True)
-
     msg = f"🎯 GOAL PROGRESS — {team}\n🕒 Shift: {label}\n✅ Shift started: {start.strftime('%b %d, %Y %I:%M %p')} (PH)\n\n"
-    for i, (uname, pages_map, _) in enumerate(data, 1):
-        msg += f"{i}. {uname}\n"
-        for page, amt in pages_map.items():
-            goal = shift_goals.get(page, 0)
-            if goal:
-                pct = (amt / goal) * 100
-                msg += f"   {get_color(pct)} {page}: ${amt:.2f} / ${goal:.2f} ({pct:.1f}%)\n"
-            else:
-                msg += f"   ⚪ {page}: ${amt:.2f} (no shift goal)\n"
-        msg += "\n"
+    for page, amt in sorted(totals.items(), key=lambda x: x[1], reverse=True):
+        goal = shift_goals.get(page, 0)
+        if goal:
+            pct = (amt / goal) * 100
+            msg += f"{get_color(pct)} {page}: ${amt:.2f} / ${goal:.2f} ({pct:.1f}%)\n"
+        else:
+            msg += f"⚪ {page}: ${amt:.2f} (no shift goal)\n"
+
     await update.message.reply_text(msg)
 
 async def redpages(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -634,21 +605,25 @@ async def redpages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     start = shift_start(now)
     label = current_shift_label(now)
 
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            SELECT page, SUM(amount) AS total
+            FROM sales
+            WHERE team=%s AND ts >= %s
+            GROUP BY page
+            """,
+            (team, start)
+        )
+        rows = cur.fetchall()
+
     totals = defaultdict(float)
-    for ev in sales_log:
-        try:
-            ev_team = split_internal(ev["user"])[1]
-            if ev_team != team:
-                continue
-            ev_dt = parse_ts(ev["ts"])
-            if ev_dt < start:
-                continue
-            totals[ev["page"]] += float(ev["amt"])
-        except Exception:
-            continue
+    for page, total in rows:
+        totals[str(page)] += float(total)
 
     for page, val in manual_shift_totals.items():
-        totals[page] = float(val)
+        if float(val) != 0:
+            totals[page] = float(val)
 
     msg = f"🚨 RED PAGES — {team}\n🕒 Shift: {label}\n✅ Shift started: {start.strftime('%b %d, %Y %I:%M %p')} (PH)\n\n"
     any_found = False
@@ -665,7 +640,7 @@ async def redpages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("✅ No red pages right now (this shift).")
     await update.message.reply_text(msg)
 
-# -------------- BOT-ADMIN COMMANDS --------------
+# ----------------- BOT-ADMIN COMMANDS -----------------
 async def pagegoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     team = await require_team(update)
     if team is None:
@@ -687,11 +662,12 @@ async def pagegoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             errors.append(entry)
             continue
+
         page = clean(" ".join(parts[:-1]))
         page_goals[page] = goal
+        db_upsert_page_goal(page, goal)
         results.append(f"✓ {page} = ${goal:.2f}")
 
-    save_all()
     msg = "📊 Page Goals Updated (15/30 days):\n" + ("\n".join(results) if results else "(no valid entries)")
     if errors:
         msg += "\n\n⚠️ Invalid:\n" + "\n".join(errors)
@@ -733,8 +709,9 @@ async def clearshiftgoals(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if not await require_registered_admin(update, 1):
         return
+
     shift_goals.clear()
-    save_all()
+    db_clear_shift_goals()
     await update.message.reply_text("🧹 Cleared all SHIFT goals.")
 
 async def clearpagegoals(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -743,8 +720,9 @@ async def clearpagegoals(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if not await require_registered_admin(update, 1):
         return
+
     page_goals.clear()
-    save_all()
+    db_clear_page_goals()
     await update.message.reply_text("🧹 Cleared all PAGE goals (15/30 days).")
 
 async def quota_period(update: Update, context: ContextTypes.DEFAULT_TYPE, days: int, title: str):
@@ -755,33 +733,37 @@ async def quota_period(update: Update, context: ContextTypes.DEFAULT_TYPE, days:
         return
 
     cutoff = now_ph() - timedelta(days=days)
+
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            SELECT page, SUM(amount) AS total
+            FROM sales
+            WHERE team=%s AND ts >= %s
+            GROUP BY page
+            ORDER BY total DESC
+            """,
+            (team, cutoff)
+        )
+        rows = cur.fetchall()
+
     totals = defaultdict(float)
+    for page, total in rows:
+        totals[str(page)] = float(total)
 
-    for ev in sales_log:
-        try:
-            ev_team = split_internal(ev["user"])[1]
-            if ev_team != team:
-                continue
-            ev_dt = parse_ts(ev["ts"])
-            if ev_dt < cutoff:
-                continue
-            totals[ev["page"]] += float(ev["amt"])
-        except Exception:
-            continue
-
+    # apply page overrides (non-zero)
     for page, val in manual_page_totals.items():
-        totals[page] = float(val)
+        if float(val) != 0:
+            totals[page] = float(val)
 
     if not totals:
         return await update.message.reply_text(f"No sales found for the last {days} days.")
-
-    sorted_rows = sorted(totals.items(), key=lambda x: x[1], reverse=True)
 
     msg = f"📊 {title} — {team}\n"
     msg += f"🗓️ From: {cutoff.strftime('%b %d, %Y %I:%M %p')} (PH)\n"
     msg += f"🗓️ To:   {now_ph().strftime('%b %d, %Y %I:%M %p')} (PH)\n\n"
 
-    for page, amt in sorted_rows:
+    for page, amt in sorted(totals.items(), key=lambda x: x[1], reverse=True):
         goal = page_goals.get(page, 0)
         if goal:
             pct = (amt / goal) * 100
@@ -823,7 +805,7 @@ async def editgoalboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     manual_shift_totals[page] = amount
     manual_page_totals[page] = amount
-    save_all()
+    db_upsert_override(page, shift_total=amount, page_total=amount)
 
     await update.message.reply_text(
         f"✅ Updated totals\nGoalboard (shift): {page} = ${amount:.2f}\nQuotas (15/30): {page} = ${amount:.2f}"
@@ -854,12 +836,10 @@ async def editpagegoals(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("Amount must be a number.")
 
     manual_page_totals[page] = amount
-    save_all()
+    db_upsert_override(page, page_total=amount)
+
     await update.message.reply_text(f"✅ Updated quotas\n{page} = ${amount:.2f} (15/30 days)")
 
-# -------------------------------------------------
-# NEW: Clear override for ONE page (bot-admin only)
-# -------------------------------------------------
 async def cleargoalboardoverride(update: Update, context: ContextTypes.DEFAULT_TYPE):
     team = await require_team(update)
     if team is None:
@@ -875,11 +855,8 @@ async def cleargoalboardoverride(update: Update, context: ContextTypes.DEFAULT_T
     if page is None:
         return await update.message.reply_text("Invalid page/tag. Use a valid page name or hashtag tag.")
 
-    if page not in manual_shift_totals:
-        return await update.message.reply_text(f"ℹ️ No goalboard override found for {page}.")
-
-    del manual_shift_totals[page]
-    save_all()
+    manual_shift_totals[page] = 0
+    db_clear_override_shift(page)
     await update.message.reply_text(f"✅ Cleared goalboard override for {page}.")
 
 async def clearpageoverride(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -897,26 +874,18 @@ async def clearpageoverride(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if page is None:
         return await update.message.reply_text("Invalid page/tag. Use a valid page name or hashtag tag.")
 
-    if page not in manual_page_totals:
-        return await update.message.reply_text(f"ℹ️ No quota override found for {page}.")
-
-    del manual_page_totals[page]
-    save_all()
+    manual_page_totals[page] = 0
+    db_clear_override_page(page)
     await update.message.reply_text(f"✅ Cleared quota override for {page}.")
 
-# -------------- START --------------
+# ----------------- START -----------------
 def main():
-    init_db()   # 👈 ADD THIS LINE
-    load_all()
-    load_teams()
-    load_admins()
-
-    BOT_TOKEN = os.getenv("BOT_TOKEN")
-    if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN environment variable not set")
+    init_db()
+    load_from_db()
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
+    # sales input
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_sales))
 
     # basic
@@ -947,25 +916,13 @@ def main():
     app.add_handler(CommandHandler("editgoalboard", editgoalboard))
     app.add_handler(CommandHandler("editpagegoals", editpagegoals))
 
-    # NEW: single-page override clearing
+    # single-page override clearing
     app.add_handler(CommandHandler("cleargoalboardoverride", cleargoalboardoverride))
     app.add_handler(CommandHandler("clearpageoverride", clearpageoverride))
 
     print("BOT RUNNING…")
     app.run_polling(close_loop=False)
 
+
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
-
-
-
-
-
