@@ -27,12 +27,12 @@ def p(name: str) -> str:
 OWNER_ID = 5513230302
 PH_TZ = ZoneInfo("Asia/Manila")
 
-TEAMS_FILE = open(p("teams.json")
-ADMINS_FILE = open(p("admins.json")
-GOALS_FILE = open(p("goals.json")
-SALES_FILE = open(p("sales.json")
-SALES_LOG_FILE = open(p("sales_log.json")
-MANUAL_OVERRIDES_FILE = open(p("manual_overrides.json")
+TEAMS_FILE = p("teams.json")
+ADMINS_FILE = p("admins.json")
+GOALS_FILE = p("goals.json")
+SALES_FILE = p("sales.json")
+SALES_LOG_FILE = p("sales_log.json")
+MANUAL_OVERRIDES_FILE = p("manual_overrides.json")
 
 DEFAULT_GROUP_TEAMS = {}
 
@@ -851,6 +851,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
