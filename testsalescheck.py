@@ -725,7 +725,7 @@ def run_api_server_threadsafe():
 # =================================================
 def build_telegram_app(BOT_TOKEN: str):
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("goalboard", goalboard))
+    # app.add_handler(CommandHandler("goalboard", goalboard))
     app.add_handler(CommandHandler("redpages", redpages))
     app.add_handler(CommandHandler("quotahalf", quotahalf))
     app.add_handler(CommandHandler("quotamonth", quotamonth))
@@ -775,3 +775,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
