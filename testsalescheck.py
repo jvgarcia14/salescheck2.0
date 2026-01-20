@@ -1,8 +1,28 @@
 # ==========================================
-#   ULTIMATE SALES + GOAL BOT (RAILWAY) - DB VERSION
+#   ULTIMATE SALES + GOAL BOT (RAILWAY) - DB VERSION + AUTO GOALBOARD REPORTS
 #   - Saves sales/goals/admins/teams/overrides to Postgres
 #   - Loads everything from DB on startup
-#   - /summary will now show correct totals (because sales are in DB)
+#   - Auto-sends GOALBOARD TABLE to a registered GC every 2 hours (8AM, 10AM, 12PM... PH)
+#
+#   OWNER ONLY (OWNER_ID):
+#     /registerteam Team 1
+#     /unregisterteam
+#     /registeradmin 1   (reply to user to register them)
+#     /unregisteradmin   (reply or /unregisteradmin <user_id>)
+#     /listadmins
+#     /registergoal 1    (run inside the GC that should receive scheduled goalboard reports)
+#
+#   EVERYONE (in registered team groups):
+#     Sales input: +amount #tag
+#     /pages, /leaderboard, /goalboard, /redpages, /setgoal (SHIFT GOALS)
+#
+#   BOT-ADMINS (level >= 1):
+#     /pagegoal (PERIOD GOALS for 15/30)
+#     /viewshiftgoals, /viewpagegoals
+#     /clearshiftgoals, /clearpagegoals
+#     /quotahalf, /quotamonth
+#     /editgoalboard, /editpagegoals
+#     /cleargoalboardoverride, /clearpageoverride
 # ==========================================
 
 from telegram import Update
@@ -70,7 +90,7 @@ ALLOWED_PAGES = {
     "#claire": "Claire",
 
     "#cocofree": "Coco Free",
-    "#cocopaID": "Coco Paid",
+    "#cocopaid": "Coco Paid",  # FIXED: was "#cocopaID" which would never match .lower()
 
     "#cyndiecynthiacolby": "Cyndie, Cynthia & Colby",
 
@@ -266,6 +286,12 @@ def init_db():
             shift_total NUMERIC NOT NULL DEFAULT 0,
             page_total  NUMERIC NOT NULL DEFAULT 0
         );
+
+        -- NEW: which GC receives scheduled goalboard reports (per team)
+        CREATE TABLE IF NOT EXISTS report_groups (
+            team TEXT PRIMARY KEY,
+            chat_id BIGINT NOT NULL
+        );
         """)
 
 def db_register_team(chat_id: int, team_name: str):
@@ -341,7 +367,6 @@ def db_clear_shift_goals():
         cur.execute("DELETE FROM shift_goals")
 
 def db_upsert_override(page: str, shift_total: float | None = None, page_total: float | None = None):
-    # upsert then set columns provided
     with db.cursor() as cur:
         cur.execute(
             "INSERT INTO manual_overrides (page, shift_total, page_total) VALUES (%s, 0, 0) ON CONFLICT (page) DO NOTHING",
@@ -361,6 +386,23 @@ def db_clear_override_page(page: str):
     with db.cursor() as cur:
         cur.execute("UPDATE manual_overrides SET page_total=0 WHERE page=%s", (page,))
         cur.execute("DELETE FROM manual_overrides WHERE page=%s AND shift_total=0 AND page_total=0", (page,))
+
+def db_set_report_group(team: str, chat_id: int):
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO report_groups (team, chat_id)
+            VALUES (%s, %s)
+            ON CONFLICT (team)
+            DO UPDATE SET chat_id = EXCLUDED.chat_id;
+            """,
+            (team, chat_id)
+        )
+
+def db_get_report_groups():
+    with db.cursor() as cur:
+        cur.execute("SELECT team, chat_id FROM report_groups")
+        return [(str(t), int(cid)) for (t, cid) in cur.fetchall()]
 
 def load_from_db():
     GROUP_TEAMS.clear()
@@ -539,6 +581,31 @@ async def listadmins(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"• User ID: {uid} — level {int(lvl)}")
     await update.message.reply_text("👑 Bot Admins (this group):\n\n" + "\n".join(lines))
 
+async def registergoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    OWNER runs this in the GC that should RECEIVE the scheduled goalboard reports.
+    Example: /registergoal 1  -> registers this GC for Team 1
+             /registergoal Team 1 -> also works
+    """
+    if update.effective_chat.type == "private":
+        return await update.message.reply_text("Run this command inside the target GC (not in private).")
+    if not await require_owner(update):
+        return
+    if not context.args:
+        return await update.message.reply_text(
+            "Format: /registergoal 1\n"
+            "This registers THIS GC as the scheduled goalboard report group for Team 1."
+        )
+
+    arg = clean(" ".join(context.args)).strip()
+    team = f"Team {arg}" if arg.isdigit() else arg
+
+    db_set_report_group(team, update.effective_chat.id)
+    await update.message.reply_text(
+        f"✅ Registered this GC for scheduled GOALBOARD reports.\nTeam: {team}\n"
+        "Schedule: 8AM, 10AM, 12PM, 2PM, 4PM, 6PM, 8PM, 10PM (PH)"
+    )
+
 # ----------------- SALES HANDLER -----------------
 async def handle_sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
@@ -550,7 +617,7 @@ async def handle_sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user = update.message.from_user
     username = clean(user.username or user.first_name)
-    internal = f"{username}|{team}"
+    _internal = f"{username}|{team}"
 
     saved = False
     unknown_tags = set()
@@ -576,7 +643,6 @@ async def handle_sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
             unknown_tags.add(bad_token)
             continue
 
-        # ✅ SAVE TO DB (this is what fixes /summary)
         db_add_sale(team, canonical_page, float(amount), ts_iso)
         saved = True
 
@@ -676,7 +742,6 @@ async def goalboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         rows = cur.fetchall()
 
-    # apply shift overrides if set (non-zero)
     totals = defaultdict(float)
     for page, total in rows:
         totals[str(page)] += float(total)
@@ -856,7 +921,6 @@ async def quota_period(update: Update, context: ContextTypes.DEFAULT_TYPE, days:
     for page, total in rows:
         totals[str(page)] = float(total)
 
-    # apply page overrides (non-zero)
     for page, val in manual_page_totals.items():
         if float(val) != 0:
             totals[page] = float(val)
@@ -983,12 +1047,156 @@ async def clearpageoverride(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db_clear_override_page(page)
     await update.message.reply_text(f"✅ Cleared quota override for {page}.")
 
+# ----------------- SCHEDULED GOALBOARD (TABLE) -----------------
+def _build_goalboard_table_lines(team: str, start: datetime):
+    """
+    Returns:
+      header_text: str
+      rows: list[str]  (each row already formatted monospaced)
+    """
+    now = now_ph()
+    label = current_shift_label(now)
+
+    # shift totals from DB
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            SELECT page, COALESCE(SUM(amount), 0) AS total
+            FROM sales
+            WHERE team=%s AND ts >= %s
+            GROUP BY page
+            """,
+            (team, start)
+        )
+        rows = cur.fetchall()
+
+    totals = defaultdict(float)
+    for page, total in rows:
+        totals[str(page)] = float(total)
+
+    # apply overrides (non-zero)
+    for page, val in manual_shift_totals.items():
+        if float(val) != 0:
+            totals[page] = float(val)
+
+    # include ALL pages (even if 0 sales)
+    all_pages = sorted(set(ALLOWED_PAGES.values()) | set(shift_goals.keys()) | set(totals.keys()))
+
+    # column widths (tweak-safe)
+    # page names can be long, so we cap them to keep the table readable in Telegram
+    PAGE_W = 26
+    SALES_W = 10
+    GOAL_W = 10
+    PCT_W = 7
+    STAT_W = 2
+
+    def trunc(s: str, w: int):
+        s = str(s)
+        if len(s) <= w:
+            return s.ljust(w)
+        return (s[: w - 1] + "…")  # keep width-ish; Telegram monospace is fine
+
+    table_rows = []
+    grand_sales = 0.0
+    grand_goal = 0.0
+
+    for page in all_pages:
+        amt = float(totals.get(page, 0.0))
+        goal = float(shift_goals.get(page, 0.0))
+
+        pct = (amt / goal * 100.0) if goal > 0 else 0.0
+        color = get_color(pct) if goal > 0 else "⚪"
+
+        grand_sales += amt
+        if goal > 0:
+            grand_goal += goal
+
+        row = (
+            f"{color} "
+            f"{trunc(page, PAGE_W)} "
+            f"{('$' + format(amt, '.2f')).rjust(SALES_W)} "
+            f"{('$' + format(goal, '.2f')).rjust(GOAL_W) if goal > 0 else ' ' * GOAL_W} "
+            f"{(format(pct, '.1f') + '%').rjust(PCT_W) if goal > 0 else ' ' * PCT_W}"
+        )
+        table_rows.append(row)
+
+    header_text = (
+        f"🎯 GOALBOARD — {team}\n"
+        f"🕒 Shift: {label}\n"
+        f"✅ Shift started: {start.strftime('%b %d, %Y %I:%M %p')} (PH)\n"
+        f"📌 Updated: {now.strftime('%b %d, %Y %I:%M %p')} (PH)\n"
+        f"💰 Shift Total: ${grand_sales:.2f}\n"
+    )
+
+    # table header line
+    col_header = (
+        f"   {'PAGE'.ljust(PAGE_W)} "
+        f"{'SALES'.rjust(SALES_W)} "
+        f"{'GOAL'.rjust(GOAL_W)} "
+        f"{'%'.rjust(PCT_W)}"
+    )
+    sep = "-" * (3 + PAGE_W + 1 + SALES_W + 1 + GOAL_W + 1 + PCT_W)
+
+    return header_text, [col_header, sep] + table_rows
+
+async def send_scheduled_goalboard(context: ContextTypes.DEFAULT_TYPE):
+    """
+    Sends the GOALBOARD TABLE (all pages) to each registered report GC.
+    Splits into chunks of 50 rows per message.
+    """
+    now = now_ph()
+    start = shift_start(now)
+
+    report_groups = db_get_report_groups()
+    if not report_groups:
+        return
+
+    for team, chat_id in report_groups:
+        header_text, lines = _build_goalboard_table_lines(team, start)
+
+        # chunk rows: Telegram message length limit exists; also user asked 50 rows per message
+        chunk_size = 50
+        # lines includes table header + sep + data rows
+        table_head = lines[:2]  # header + sep
+        data_rows = lines[2:]
+
+        # if there are no pages for some reason
+        if not data_rows:
+            msg = header_text + "\nNo pages found."
+            try:
+                await context.application.bot.send_message(chat_id=chat_id, text=msg)
+            except Exception:
+                pass
+            continue
+
+        # send in chunks
+        for i in range(0, len(data_rows), chunk_size):
+            chunk = data_rows[i:i + chunk_size]
+            part = (i // chunk_size) + 1
+            total_parts = ((len(data_rows) - 1) // chunk_size) + 1
+
+            # Put the big header only on the first message to avoid spam
+            prefix = header_text if i == 0 else f"🎯 GOALBOARD — {team} (Part {part}/{total_parts})\n"
+
+            msg = prefix + "\n" + "```\n" + "\n".join(table_head + chunk) + "\n```"
+
+            try:
+                await context.application.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+            except Exception:
+                # fallback without Markdown if Telegram complains
+                try:
+                    msg2 = prefix + "\n" + "\n".join(table_head + chunk)
+                    await context.application.bot.send_message(chat_id=chat_id, text=msg2)
+                except Exception:
+                    pass
+
 # ----------------- START -----------------
 def main():
     init_db()
     load_from_db()
 
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    # IMPORTANT: timezone set so run_daily uses PH time correctly
+    app = ApplicationBuilder().token(BOT_TOKEN).timezone(PH_TZ).build()
 
     # sales input
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_sales))
@@ -1002,6 +1210,7 @@ def main():
     app.add_handler(CommandHandler("registeradmin", registeradmin))
     app.add_handler(CommandHandler("unregisteradmin", unregisteradmin))
     app.add_handler(CommandHandler("listadmins", listadmins))
+    app.add_handler(CommandHandler("registergoal", registergoal))  # NEW
 
     # everyone
     app.add_handler(CommandHandler("pages", pages))
@@ -1025,12 +1234,17 @@ def main():
     app.add_handler(CommandHandler("cleargoalboardoverride", cleargoalboardoverride))
     app.add_handler(CommandHandler("clearpageoverride", clearpageoverride))
 
+    # SCHEDULE: every 2 hours starting 8AM (PH)
+    report_hours = [8, 10, 12, 14, 16, 18, 20, 22]
+    for h in report_hours:
+        app.job_queue.run_daily(
+            send_scheduled_goalboard,
+            time=time(h, 0, tzinfo=PH_TZ),
+            name=f"scheduled_goalboard_{h:02d}00_ph"
+        )
+
     print("BOT RUNNING…")
     app.run_polling(close_loop=False)
 
-
 if __name__ == "__main__":
     main()
-
-
-
