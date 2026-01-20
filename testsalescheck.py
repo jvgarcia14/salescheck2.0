@@ -14,6 +14,38 @@ from collections import defaultdict
 from datetime import datetime, timedelta, time
 from zoneinfo import ZoneInfo
 import json, os
+import os
+import psycopg2
+from psycopg2.extras import RealDictCursor
+
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL not set")
+
+conn = psycopg2.connect(DATABASE_URL, sslmode="require")
+conn.autocommit = True
+
+def init_db():
+    with conn.cursor() as cur:
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS teams (
+            chat_id BIGINT PRIMARY KEY,
+            name TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS sales (
+            team TEXT,
+            page TEXT,
+            amount NUMERIC,
+            ts TIMESTAMPTZ DEFAULT now()
+        );
+
+        CREATE TABLE IF NOT EXISTS page_goals (
+            page TEXT PRIMARY KEY,
+            goal NUMERIC
+        );
+        """)
+
 # ================================
 # SHARED DATA DIRECTORY (Railway Volume)
 # ================================
@@ -902,6 +934,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
