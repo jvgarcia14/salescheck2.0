@@ -4,6 +4,11 @@ from zoneinfo import ZoneInfo
 from collections import defaultdict
 import json, os
 
+DATA_DIR = os.getenv("DATA_DIR", "/app/data")
+
+def path(name: str) -> str:
+    return os.path.join(DATA_DIR, name)
+    
 PH_TZ = ZoneInfo("Asia/Manila")
 
 SALES_LOG_FILE = "sales_log.json"
