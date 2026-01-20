@@ -77,51 +77,66 @@ def summary(days: int = 15, team: str = "Team 1"):
     if days not in (15, 30):
         raise HTTPException(status_code=400, detail="days must be 15 or 30")
 
-    cutoff_ph = now_ph() - timedelta(days=days)
+    log = _load_json(SALES_LOG_FILE, [])
+    if not isinstance(log, list):
+        log = []
 
-    # Convert cutoff to UTC-friendly timestamp by using aware PH time,
-    # psycopg2 will handle tz conversion correctly with TIMESTAMPTZ.
-    cutoff = cutoff_ph
+    overrides = _load_json(MANUAL_OVERRIDES_FILE, {"shift": {}, "page": {}})
+    if not isinstance(overrides, dict):
+        overrides = {"shift": {}, "page": {}}
+    overrides.setdefault("shift", {})
+    overrides.setdefault("page", {})
 
-    # 1) Pull totals per page from sales
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT page, COALESCE(SUM(amount), 0) AS total
-            FROM sales
-            WHERE team = %s AND ts >= %s
-            GROUP BY page
-            ORDER BY total DESC;
-            """,
-            (team, cutoff),
-        )
-        sales_rows = cur.fetchall()
+    goals_raw = _load_json(GOALS_FILE, {"shift_goals": {}, "page_goals": {}})
+    if not isinstance(goals_raw, dict):
+        goals_raw = {"shift_goals": {}, "page_goals": {}}
+    goals_raw.setdefault("shift_goals", {})
+    goals_raw.setdefault("page_goals", {})
 
-    totals = {page: float(total) for page, total in sales_rows}
+    page_goals = goals_raw["page_goals"]
+    cutoff = _now_ph() - timedelta(days=days)
 
-    # 2) Pull goals per page from page_goals
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT page, goal
-            FROM page_goals
-            WHERE team = %s;
-            """,
-            (team,),
-        )
-        goal_rows = cur.fetchall()
+    totals = defaultdict(float)
 
-    page_goals = {page: float(goal) for page, goal in goal_rows}
+    for ev in log:
+        try:
+            if not isinstance(ev, dict):
+                continue
+            _, ev_team = _split_internal(str(ev.get("user", "")))
+            if ev_team != team:
+                continue
 
-    # 3) Combine
+            ts_raw = ev.get("ts")
+            if not ts_raw:
+                continue
+            ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+
+            if ts < cutoff:
+                continue
+
+            page = str(ev.get("page", "")).strip()
+            amt = float(ev.get("amt", 0))
+            if page:
+                totals[page] += amt
+        except Exception:
+            continue
+
+    # Apply quota overrides (page)
+    for page, val in overrides["page"].items():
+        try:
+            totals[str(page)] = float(val)
+        except Exception:
+            pass
+
     all_pages = set(totals.keys()) | set(page_goals.keys())
+
     rows = []
     total_sales = 0.0
     total_goal = 0.0
 
     for page in all_pages:
         sales = float(totals.get(page, 0.0))
-        goal = float(page_goals.get(page, 0.0))
+        goal = float(page_goals.get(page, 0.0) or 0.0)
         pct = (sales / goal * 100.0) if goal > 0 else None
 
         total_sales += sales
@@ -131,7 +146,7 @@ def summary(days: int = 15, team: str = "Team 1"):
             "page": page,
             "sales": round(sales, 2),
             "goal": round(goal, 2),
-            "pct": round(pct, 1) if pct is not None else None,
+            "pct": round(pct, 1) if pct is not None else None
         })
 
     rows.sort(key=lambda r: r["sales"], reverse=True)
@@ -140,10 +155,11 @@ def summary(days: int = 15, team: str = "Team 1"):
     return {
         "team": team,
         "days": days,
-        "from": cutoff_ph.isoformat(),
-        "to": now_ph().isoformat(),
+        "from": cutoff.isoformat(),
+        "to": _now_ph().isoformat(),
         "total_sales": round(total_sales, 2),
         "total_goal": round(total_goal, 2),
         "overall_pct": round(overall_pct, 1) if overall_pct is not None else None,
-        "rows": rows,
+        "rows": rows
     }
+
