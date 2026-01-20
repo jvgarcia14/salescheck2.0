@@ -16,8 +16,13 @@ app = FastAPI(title="Sales Bot API")
 def _load_json(path, default):
     if not os.path.exists(path):
         return default
-    with open(path, "r") as f:
-        return json.load(f)
+    try:
+        if os.path.getsize(path) == 0:
+            return default
+        with open(path, "r") as f:
+            return json.load(f)
+    except Exception:
+        return default
 
 def _split_internal(internal: str):
     parts = internal.split("|", 1)
@@ -47,7 +52,6 @@ def summary(days: int = 15, team: str = "Team 1"):
     overrides = _load_json(MANUAL_OVERRIDES_FILE, {"shift": {}, "page": {}})
     goals_raw = _load_json(GOALS_FILE, {"shift_goals": {}, "page_goals": {}})
 
-    # ✅ THIS uses /pagegoal goals
     page_goals = goals_raw.get("page_goals", {})
 
     cutoff = _now_ph() - timedelta(days=days)
@@ -65,7 +69,7 @@ def summary(days: int = 15, team: str = "Team 1"):
         except Exception:
             continue
 
-    # Apply quota overrides: /editpagegoals replaces totals
+    # Apply quota overrides
     for page, val in overrides.get("page", {}).items():
         totals[page] = float(val)
 
