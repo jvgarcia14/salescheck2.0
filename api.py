@@ -6,10 +6,38 @@ import json, os
 import os
 import psycopg2
 from fastapi import FastAPI
-DATA_DIR = os.getenv("DATA_DIR", "/app/data")
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL not set")
 
-def path(name: str) -> str:
-    return os.path.join(DATA_DIR, name)
+conn = psycopg2.connect(DATABASE_URL, sslmode="require")
+conn.autocommit = True
+
+def init_db():
+    with conn.cursor() as cur:
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS teams (
+            chat_id BIGINT PRIMARY KEY,
+            name TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS sales (
+            team TEXT,
+            page TEXT,
+            amount NUMERIC,
+            ts TIMESTAMPTZ DEFAULT now()
+        );
+
+        CREATE TABLE IF NOT EXISTS page_goals (
+            page TEXT PRIMARY KEY,
+            goal NUMERIC
+        );
+        """)
+
+
+app = FastAPI(title="Sales Bot API")
+
+init_db()  
     
 PH_TZ = ZoneInfo("Asia/Manila")
 
@@ -17,9 +45,6 @@ SALES_LOG_FILE = path("sales_log.json")
 TEAMS_FILE = path("teams.json")
 MANUAL_OVERRIDES_FILE = path("manual_overrides.json")
 GOALS_FILE = path("goals.json")
-
-app = FastAPI(title="Sales Bot API")
-init_db()
 def _load_json(path, default):
     if not os.path.exists(path):
         return default
