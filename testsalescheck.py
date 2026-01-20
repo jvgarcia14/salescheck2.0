@@ -885,6 +885,7 @@ async def clearpageoverride(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # -------------- START --------------
 def main():
+    init_db()   # 👈 ADD THIS LINE
     load_all()
     load_teams()
     load_admins()
@@ -934,6 +935,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
