@@ -338,9 +338,11 @@ async def chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Chat type: {chat.type}\nChat ID: {chat.id}")
 
 # -------------- OWNER ONLY: TEAM + ADMINS --------------
+# -------------- OWNER ONLY: TEAM + ADMINS --------------
 async def registerteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == "private":
         return await update.message.reply_text("Run this command inside the team group (not in private).")
+
     if not await require_owner(update):
         return
 
@@ -349,13 +351,18 @@ async def registerteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("Format: /registerteam Team 1")
 
     chat_id = update.effective_chat.id
-    GROUP_TEAMS[chat_id] = team_name
-    save_teams()
+
+    # keep your existing JSON behavior
     GROUP_TEAMS[chat_id] = team_name
     save_teams()
 
-db_register_team(chat_id, team_name)   # ✅ ADD THIS LINE
-    await update.message.reply_text(f"✅ Registered this group!\nTeam: {team_name}\nChat ID: {chat_id}\nNext: /registeradmin 1")
+    # ✅ add DB write (ONLY this extra line)
+    db_register_team(chat_id, team_name)
+
+    return await update.message.reply_text(
+        f"✅ Registered this group!\nTeam: {team_name}\nChat ID: {chat_id}\nNext: /registeradmin 1"
+    )
+
 
 async def unregisterteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == "private":
@@ -946,6 +953,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
