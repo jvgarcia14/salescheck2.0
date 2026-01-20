@@ -17,6 +17,9 @@ import json, os
 import psycopg2, os
 
 DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL not set")
+
 db = psycopg2.connect(DATABASE_URL, sslmode="require")
 db.autocommit = True
 
@@ -953,6 +956,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
