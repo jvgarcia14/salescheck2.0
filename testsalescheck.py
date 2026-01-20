@@ -14,16 +14,23 @@ from collections import defaultdict
 from datetime import datetime, timedelta, time
 from zoneinfo import ZoneInfo
 import json, os
-import os
-import psycopg2
-from psycopg2.extras import RealDictCursor
+import psycopg2, os
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-if not DATABASE_URL:
-    raise RuntimeError("DATABASE_URL not set")
+db = psycopg2.connect(DATABASE_URL, sslmode="require")
+db.autocommit = True
 
-conn = psycopg2.connect(DATABASE_URL, sslmode="require")
-conn.autocommit = True
+def db_register_team(chat_id: int, team_name: str):
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO teams (chat_id, name)
+            VALUES (%s, %s)
+            ON CONFLICT (chat_id)
+            DO UPDATE SET name = EXCLUDED.name;
+            """,
+            (chat_id, team_name)
+        )
 
 def init_db():
     with conn.cursor() as cur:
@@ -935,6 +942,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
