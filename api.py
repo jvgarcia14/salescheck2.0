@@ -23,7 +23,8 @@ def init_db():
             chat_id BIGINT PRIMARY KEY,
             name TEXT NOT NULL
         );
-
+        """)
+        cur.execute("""
         CREATE TABLE IF NOT EXISTS sales (
             chat_id BIGINT,
             team TEXT NOT NULL,
@@ -31,8 +32,8 @@ def init_db():
             amount NUMERIC NOT NULL,
             ts TIMESTAMPTZ DEFAULT now()
         );
-
-        -- goals are per team + page (better than just page)
+        """)
+        cur.execute("""
         CREATE TABLE IF NOT EXISTS page_goals (
             team TEXT NOT NULL,
             page TEXT NOT NULL,
