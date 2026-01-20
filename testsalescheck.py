@@ -1196,7 +1196,7 @@ def main():
     load_from_db()
 
     # IMPORTANT: timezone set so run_daily uses PH time correctly
-    app = ApplicationBuilder().token(BOT_TOKEN).timezone(PH_TZ).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # sales input
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_sales))
@@ -1248,3 +1248,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
