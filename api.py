@@ -1,4 +1,5 @@
 import os
+from pydantic import BaseModel
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from collections import defaultdict
@@ -268,4 +269,54 @@ def summary(days: int = 15, team: str = "Team 1", authorization: str | None = He
         "total_goal": round(total_goal, 2),
         "overall_pct": round(overall_pct, 1) if overall_pct is not None else None,
         "rows": rows
+    }
+# =========================
+# PAGE GOALS (ADD / EDIT)
+# =========================
+
+class PageGoalPayload(BaseModel):
+    team: str
+    page: str
+    goal: float
+
+
+@app.post("/pagegoal")
+def upsert_page_goal(
+    payload: PageGoalPayload,
+    authorization: str | None = Header(default=None),
+):
+    require_token(authorization)
+
+    team = (payload.team or "").strip()
+    page = (payload.page or "").strip()
+    goal = float(payload.goal)
+
+    if not team:
+        raise HTTPException(status_code=400, detail="team is required")
+    if not page:
+        raise HTTPException(status_code=400, detail="page is required")
+    if goal < 0:
+        raise HTTPException(status_code=400, detail="goal must be >= 0")
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO page_goals (team, page, goal)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (team, page)
+                DO UPDATE SET goal = EXCLUDED.goal;
+                """,
+                (team, page, goal),
+            )
+        conn.commit()
+    finally:
+        put_conn(conn)
+
+    return {
+        "ok": True,
+        "team": team,
+        "page": page,
+        "goal": goal,
     }
