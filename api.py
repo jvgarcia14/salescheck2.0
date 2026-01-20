@@ -17,7 +17,7 @@ MANUAL_OVERRIDES_FILE = path("manual_overrides.json")
 GOALS_FILE = path("goals.json")
 
 app = FastAPI(title="Sales Bot API")
-
+init_db()
 def _load_json(path, default):
     if not os.path.exists(path):
         return default
