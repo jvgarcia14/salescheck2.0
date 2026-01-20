@@ -719,18 +719,31 @@ def run_api_server_threadsafe():
 
     server.run()
 
-
+def add_optional_handler(app, command: str, fn_name: str):
+    """
+    Adds a CommandHandler only if the function exists in globals().
+    Prevents NameError crashes on deploy when optional features are not present.
+    """
+    fn = globals().get(fn_name)
+    if callable(fn):
+        app.add_handler(CommandHandler(command, fn))
+    else:
+        print(f"[WARN] Optional handler skipped: /{command} (missing function: {fn_name})")
 # =================================================
 # START BOT
 # =================================================
 def build_telegram_app(BOT_TOKEN: str):
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    # app.add_handler(CommandHandler("goalboard", goalboard))
-    app.add_handler(CommandHandler("redpages", redpages))
-    app.add_handler(CommandHandler("quotahalf", quotahalf))
-    app.add_handler(CommandHandler("quotamonth", quotamonth))
-    app.add_handler(CommandHandler("editgoalboard", editgoalboard))
-    app.add_handler(CommandHandler("editpagegoals", editpagegoals))
+
+    # Optional / advanced commands (won’t crash if missing)
+    add_optional_handler(app, "goalboard", "goalboard")
+    add_optional_handler(app, "redpages", "redpages")
+    add_optional_handler(app, "quotahalf", "quotahalf")
+    add_optional_handler(app, "quotamonth", "quotamonth")
+    add_optional_handler(app, "editgoalboard", "editgoalboard")
+    add_optional_handler(app, "editpagegoals", "editpagegoals")
+
+    # Core commands (always present)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_sales))
     app.add_handler(CommandHandler("chatid", chatid))
     app.add_handler(CommandHandler("registerteam", registerteam))
@@ -747,11 +760,8 @@ def build_telegram_app(BOT_TOKEN: str):
     app.add_handler(CommandHandler("clearshiftgoals", clearshiftgoals))
     app.add_handler(CommandHandler("clearpagegoals", clearpagegoals))
 
-    # IMPORTANT:
-    # Re-add your handlers for goalboard/redpages/quotahalf/quotamonth/editgoalboard/editpagegoals
-    # if they are defined above in your file.
-
     return app
+
 
 
 def main():
@@ -775,4 +785,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
