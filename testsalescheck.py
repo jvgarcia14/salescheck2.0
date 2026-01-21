@@ -2,25 +2,27 @@
 #   ULTIMATE SALES + GOAL BOT (RAILWAY) - DB VERSION + AUTO GOALBOARD REPORTS (TOPIC SUPPORT)
 #   - Saves sales/goals/admins/teams/overrides to Postgres
 #   - Loads everything from DB on startup
-#   - Auto-sends GOALBOARD TABLE to a registered GC every 2 hours (8AM, 10AM, 12PM... PH)
-#   - NEW: /registergoal stores the TOPIC (message_thread_id) if you run it inside a topic
-#          so the scheduled goalboard stats will post ONLY in that topic.
+#   - Auto-sends GOALBOARD TABLE every 2 hours (8AM, 10AM, 12PM... PH)
+#
+#   ✅ NEW: /registergoalall
+#     - Run INSIDE the TOPIC you want (PAGE STATS topic)
+#     - Bot will auto-send GOALBOARD for ALL TEAMS into that topic
 #
 #   OWNER ONLY (OWNER_ID):
 #     /registerteam Team 1
 #     /unregisterteam
-#     /registeradmin 1   (reply to user to register them)
-#     /unregisteradmin   (reply or /unregisteradmin <user_id>)
+#     /registeradmin 1
+#     /unregisteradmin
 #     /listadmins
-#     /registergoal 1    (run inside the GC topic that should receive scheduled goalboard reports)
+#     /registergoal 1         (per-team destination)
+#     /registergoalall        (global destination for ALL teams)
 #
-#   EVERYONE (in registered team groups):
+#   EVERYONE:
 #     Sales input: +amount #tag
-#     /pages, /leaderboard, /goalboard, /redpages, /setgoal (SHIFT GOALS)
+#     /pages, /leaderboard, /goalboard, /redpages, /setgoal
 #
 #   BOT-ADMINS (level >= 1):
-#     /pagegoal (PERIOD GOALS for 15/30)
-#     /viewshiftgoals, /viewpagegoals
+#     /pagegoal, /viewshiftgoals, /viewpagegoals
 #     /clearshiftgoals, /clearpagegoals
 #     /quotahalf, /quotamonth
 #     /editgoalboard, /editpagegoals
@@ -93,7 +95,7 @@ ALLOWED_PAGES = {
     "#claire": "Claire",
 
     "#cocofree": "Coco Free",
-    "#cocopaid": "Coco Paid",  # fixed
+    "#cocopaid": "Coco Paid",
 
     "#cyndiecynthiacolby": "Cyndie, Cynthia & Colby",
     "#cynthiafree": "Cyndie, Cynthia & Colby",
@@ -176,13 +178,11 @@ ALLOWED_PAGES = {
 GROUP_TEAMS = {}  # chat_id -> team name
 CHAT_ADMINS = defaultdict(dict)  # chat_id -> {user_id: level}
 
-# goals
-shift_goals = defaultdict(float)  # page -> goal
-page_goals = defaultdict(float)   # page -> goal
+shift_goals = defaultdict(float)
+page_goals = defaultdict(float)
 
-# manual overrides
-manual_shift_totals = defaultdict(float)  # page -> override amount
-manual_page_totals = defaultdict(float)   # page -> override amount
+manual_shift_totals = defaultdict(float)
+manual_page_totals = defaultdict(float)
 
 # ---------------- UTIL ----------------
 def clean(text: str):
@@ -287,18 +287,24 @@ def init_db():
             page_total  NUMERIC NOT NULL DEFAULT 0
         );
 
+        -- per-team destination
         CREATE TABLE IF NOT EXISTS report_groups (
             team TEXT PRIMARY KEY,
             chat_id BIGINT NOT NULL,
             thread_id BIGINT
         );
+
+        -- ✅ GLOBAL destination for ALL teams
+        CREATE TABLE IF NOT EXISTS global_report_dest (
+            id INT PRIMARY KEY DEFAULT 1,
+            chat_id BIGINT NOT NULL,
+            thread_id BIGINT
+        );
         """)
 
-        # ✅ MIGRATION: add thread_id column if table existed before
-        cur.execute("""
-        ALTER TABLE report_groups
-        ADD COLUMN IF NOT EXISTS thread_id BIGINT;
-        """)
+        # safety migrations
+        cur.execute("""ALTER TABLE report_groups ADD COLUMN IF NOT EXISTS thread_id BIGINT;""")
+        cur.execute("""ALTER TABLE global_report_dest ADD COLUMN IF NOT EXISTS thread_id BIGINT;""")
 
 def db_register_team(chat_id: int, team_name: str):
     with db.cursor() as cur:
@@ -393,7 +399,7 @@ def db_clear_override_page(page: str):
         cur.execute("UPDATE manual_overrides SET page_total=0 WHERE page=%s", (page,))
         cur.execute("DELETE FROM manual_overrides WHERE page=%s AND shift_total=0 AND page_total=0", (page,))
 
-def db_set_report_group(team: str, chat_id: int, thread_id: int | None):
+def db_set_report_group(team: str, chat_id: int, thread_id):
     with db.cursor() as cur:
         cur.execute(
             """
@@ -414,6 +420,29 @@ def db_get_report_groups():
             out.append((str(t), int(cid), int(th) if th is not None else None))
         return out
 
+# ✅ GLOBAL DEST helpers
+def db_set_global_report_dest(chat_id: int, thread_id):
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO global_report_dest (id, chat_id, thread_id)
+            VALUES (1, %s, %s)
+            ON CONFLICT (id)
+            DO UPDATE SET chat_id=EXCLUDED.chat_id,
+                          thread_id=EXCLUDED.thread_id;
+            """,
+            (chat_id, thread_id)
+        )
+
+def db_get_global_report_dest():
+    with db.cursor() as cur:
+        cur.execute("SELECT chat_id, thread_id FROM global_report_dest WHERE id=1")
+        row = cur.fetchone()
+        if not row:
+            return None
+        chat_id, thread_id = row
+        return int(chat_id), (int(thread_id) if thread_id is not None else None)
+
 def load_from_db():
     GROUP_TEAMS.clear()
     CHAT_ADMINS.clear()
@@ -423,17 +452,14 @@ def load_from_db():
     manual_page_totals.clear()
 
     with db.cursor() as cur:
-        # teams
         cur.execute("SELECT chat_id, name FROM teams")
         for chat_id, name in cur.fetchall():
             GROUP_TEAMS[int(chat_id)] = str(name)
 
-        # admins
         cur.execute("SELECT chat_id, user_id, level FROM admins")
         for chat_id, user_id, level in cur.fetchall():
             CHAT_ADMINS[int(chat_id)][int(user_id)] = int(level)
 
-        # goals
         cur.execute("SELECT page, goal FROM shift_goals")
         for page, goal in cur.fetchall():
             shift_goals[str(page)] = float(goal)
@@ -442,7 +468,6 @@ def load_from_db():
         for page, goal in cur.fetchall():
             page_goals[str(page)] = float(goal)
 
-        # overrides
         cur.execute("SELECT page, shift_total, page_total FROM manual_overrides")
         for page, s, p in cur.fetchall():
             page = str(page)
@@ -485,7 +510,6 @@ async def chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def registerteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == "private":
         return await update.message.reply_text("Run this command inside the team group (not in private).")
-
     if not await require_owner(update):
         return
 
@@ -494,7 +518,6 @@ async def registerteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("Format: /registerteam Team 1")
 
     chat_id = update.effective_chat.id
-
     GROUP_TEAMS[chat_id] = team_name
     db_register_team(chat_id, team_name)
 
@@ -524,10 +547,8 @@ async def registeradmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("Run this command inside the team group (not in private).")
     if not await require_owner(update):
         return
-
     if not context.args:
         return await update.message.reply_text("Format: /registeradmin 1\nTip: reply to a user then run /registeradmin 1")
-
     try:
         level = int(context.args[0])
     except ValueError:
@@ -606,10 +627,7 @@ async def registergoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     team = f"Team {arg}" if arg.isdigit() else arg
 
     chat_id = update.effective_chat.id
-    thread_id = None
-
-    if update.effective_message:
-        thread_id = update.effective_message.message_thread_id  # will be None if you're in General
+    thread_id = update.effective_message.message_thread_id if update.effective_message else None
 
     try:
         db_set_report_group(team, chat_id, thread_id)
@@ -624,6 +642,27 @@ async def registergoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Schedule: 8AM, 10AM, 12PM, 2PM, 4PM, 6PM, 8PM, 10PM (PH)"
     )
 
+# ✅ NEW: GLOBAL register for ALL teams
+async def registergoalall(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type == "private":
+        return await update.message.reply_text("Run this command inside the target GC (not in private).")
+    if not await require_owner(update):
+        return
+
+    chat_id = update.effective_chat.id
+    thread_id = update.effective_message.message_thread_id if update.effective_message else None
+
+    try:
+        db_set_global_report_dest(chat_id, thread_id)
+    except Exception as e:
+        return await update.message.reply_text(f"❌ DB error while saving GLOBAL destination:\n{e}")
+
+    where = "General" if not thread_id else f"Topic (thread_id={thread_id})"
+    await update.message.reply_text(
+        "✅ Registered GLOBAL destination for scheduled GOALBOARD reports (ALL TEAMS).\n"
+        f"Posts to: {where}\n\n"
+        "Schedule: 8AM, 10AM, 12PM, 2PM, 4PM, 6PM, 8PM, 10PM (PH)"
+    )
 
 # ----------------- SALES HANDLER -----------------
 async def handle_sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -638,8 +677,10 @@ async def handle_sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
     unknown_tags = set()
     ts_iso = now_ph().isoformat()
 
-    for line in update.message.text.splitlines():
-        line = line.strip()
+    for raw in update.message.text.splitlines():
+        line = raw.strip()
+        # allow *+100, •+100, -+100 etc
+        line = line.lstrip("*•- ").strip()
         if not line.startswith("+"):
             continue
 
@@ -1068,11 +1109,6 @@ async def clearpageoverride(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ----------------- SCHEDULED GOALBOARD (TABLE) -----------------
 def _build_goalboard_table_lines(team: str, start: datetime):
-    """
-    Returns:
-      header_text: str
-      rows: list[str]  (each row already formatted monospaced)
-    """
     now = now_ph()
     label = current_shift_label(now)
 
@@ -1150,13 +1186,67 @@ def _build_goalboard_table_lines(team: str, start: datetime):
 
 async def send_scheduled_goalboard(context: ContextTypes.DEFAULT_TYPE):
     """
-    Sends the GOALBOARD TABLE (all pages) to each registered report GC.
-    If thread_id is set, posts ONLY in that Topic.
-    Splits into chunks of 50 rows per message.
+    Priority:
+      1) If /registergoalall exists -> send ALL teams to that one topic/chat
+      2) Else -> send per-team destinations from /registergoal
     """
     now = now_ph()
     start = shift_start(now)
 
+    global_dest = db_get_global_report_dest()
+    if global_dest:
+        global_chat_id, global_thread_id = global_dest
+        teams = sorted(set(GROUP_TEAMS.values()))
+        if not teams:
+            return
+
+        for team in teams:
+            header_text, lines = _build_goalboard_table_lines(team, start)
+
+            chunk_size = 50
+            table_head = lines[:2]
+            data_rows = lines[2:]
+
+            if not data_rows:
+                msg = header_text + "\nNo pages found."
+                try:
+                    await context.application.bot.send_message(
+                        chat_id=global_chat_id,
+                        text=msg,
+                        message_thread_id=global_thread_id if global_thread_id else None
+                    )
+                except Exception:
+                    pass
+                continue
+
+            for i in range(0, len(data_rows), chunk_size):
+                chunk = data_rows[i:i + chunk_size]
+                part = (i // chunk_size) + 1
+                total_parts = ((len(data_rows) - 1) // chunk_size) + 1
+
+                prefix = header_text if i == 0 else f"🎯 GOALBOARD — {team} (Part {part}/{total_parts})\n"
+                msg = prefix + "\n" + "```\n" + "\n".join(table_head + chunk) + "\n```"
+
+                try:
+                    await context.application.bot.send_message(
+                        chat_id=global_chat_id,
+                        text=msg,
+                        parse_mode="Markdown",
+                        message_thread_id=global_thread_id if global_thread_id else None
+                    )
+                except Exception:
+                    try:
+                        msg2 = prefix + "\n" + "\n".join(table_head + chunk)
+                        await context.application.bot.send_message(
+                            chat_id=global_chat_id,
+                            text=msg2,
+                            message_thread_id=global_thread_id if global_thread_id else None
+                        )
+                    except Exception:
+                        pass
+        return
+
+    # fallback: per-team destinations
     report_groups = db_get_report_groups()
     if not report_groups:
         return
@@ -1226,6 +1316,7 @@ def main():
     app.add_handler(CommandHandler("unregisteradmin", unregisteradmin))
     app.add_handler(CommandHandler("listadmins", listadmins))
     app.add_handler(CommandHandler("registergoal", registergoal))
+    app.add_handler(CommandHandler("registergoalall", registergoalall))
 
     # everyone
     app.add_handler(CommandHandler("pages", pages))
@@ -1261,7 +1352,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
 
