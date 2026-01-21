@@ -95,6 +95,7 @@ ALLOWED_PAGES = {
     "#cocopaid": "Coco Paid",  # fixed
 
     "#cyndiecynthiacolby": "Cyndie, Cynthia & Colby",
+    "#cynthiafree": "Cyndie, Cynthia & Colby",
 
     "#dandfreeoftv": "Dan D Free / OFTV",
     "#dandpaid": "Dan D Paid",
@@ -154,6 +155,7 @@ ALLOWED_PAGES = {
 
     "#natalierfree": "Natalie R Free",
     "#natalierpaid": "Natalie R Paid",
+    "#niapaid": "nia Paid",
 
     "#paris": "Paris",
 
@@ -1258,5 +1260,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
