@@ -1058,7 +1058,7 @@ async def editgoalboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     page = canonicalize_page_name(page_str)
     if page is None:
-    return await update.message.reply_text(
+        return await update.message.reply_text(
         "Invalid page/tag. Use a valid page name or hashtag tag."
     )
 
@@ -1404,5 +1404,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
