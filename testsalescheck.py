@@ -284,13 +284,17 @@ def init_db():
             page_total  NUMERIC NOT NULL DEFAULT 0
         );
 
-        -- report destination per team
-        -- NEW: thread_id = Telegram topic id (message_thread_id). If NULL, posts in General.
         CREATE TABLE IF NOT EXISTS report_groups (
             team TEXT PRIMARY KEY,
             chat_id BIGINT NOT NULL,
             thread_id BIGINT
         );
+        """)
+
+        # ✅ MIGRATION: add thread_id column if table existed before
+        cur.execute("""
+        ALTER TABLE report_groups
+        ADD COLUMN IF NOT EXISTS thread_id BIGINT;
         """)
 
 def db_register_team(chat_id: int, team_name: str):
@@ -1258,3 +1262,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
