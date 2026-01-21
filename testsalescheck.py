@@ -58,6 +58,7 @@ ALLOWED_PAGES = {
     "#alannafreeoftv": "Alanna Free / OFTV",
     "#alannapaid": "Alanna Paid",
     "#alannawelcome": "Alanna Welcome",
+    "#alexalana": "Alexa lana",
 
     "#alexis": "Alexis",
 
@@ -1260,6 +1261,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
