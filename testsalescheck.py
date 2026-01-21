@@ -589,14 +589,6 @@ async def listadmins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👑 Bot Admins (this group):\n\n" + "\n".join(lines))
 
 async def registergoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    OWNER runs this in the GC or TOPIC that should RECEIVE the scheduled goalboard reports.
-    If you run it inside a Topic (like PAGE STATS), message_thread_id will be saved,
-    so scheduled stats post ONLY in that topic.
-
-    Example: /registergoal 1  -> registers this GC/TOPIC for Team 1
-             /registergoal Team 1 -> also works
-    """
     if update.effective_chat.type == "private":
         return await update.message.reply_text("Run this command inside the target GC (not in private).")
     if not await require_owner(update):
@@ -611,12 +603,15 @@ async def registergoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     team = f"Team {arg}" if arg.isdigit() else arg
 
     chat_id = update.effective_chat.id
-    # This is the magic: topic id if command is executed inside a topic
     thread_id = None
-    if update.effective_message:
-        thread_id = update.effective_message.message_thread_id  # None if executed in General (non-topic message)
 
-    db_set_report_group(team, chat_id, thread_id)
+    if update.effective_message:
+        thread_id = update.effective_message.message_thread_id  # will be None if you're in General
+
+    try:
+        db_set_report_group(team, chat_id, thread_id)
+    except Exception as e:
+        return await update.message.reply_text(f"❌ DB error while saving report destination:\n{e}")
 
     where = "General" if not thread_id else f"Topic (thread_id={thread_id})"
     await update.message.reply_text(
@@ -625,6 +620,7 @@ async def registergoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Posts to: {where}\n\n"
         "Schedule: 8AM, 10AM, 12PM, 2PM, 4PM, 6PM, 8PM, 10PM (PH)"
     )
+
 
 # ----------------- SALES HANDLER -----------------
 async def handle_sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1262,4 +1258,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
