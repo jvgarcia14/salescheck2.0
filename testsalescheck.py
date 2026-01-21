@@ -1,8 +1,10 @@
 # ==========================================
-#   ULTIMATE SALES + GOAL BOT (RAILWAY) - DB VERSION + AUTO GOALBOARD REPORTS
+#   ULTIMATE SALES + GOAL BOT (RAILWAY) - DB VERSION + AUTO GOALBOARD REPORTS (TOPIC SUPPORT)
 #   - Saves sales/goals/admins/teams/overrides to Postgres
 #   - Loads everything from DB on startup
 #   - Auto-sends GOALBOARD TABLE to a registered GC every 2 hours (8AM, 10AM, 12PM... PH)
+#   - NEW: /registergoal stores the TOPIC (message_thread_id) if you run it inside a topic
+#          so the scheduled goalboard stats will post ONLY in that topic.
 #
 #   OWNER ONLY (OWNER_ID):
 #     /registerteam Team 1
@@ -10,7 +12,7 @@
 #     /registeradmin 1   (reply to user to register them)
 #     /unregisteradmin   (reply or /unregisteradmin <user_id>)
 #     /listadmins
-#     /registergoal 1    (run inside the GC that should receive scheduled goalboard reports)
+#     /registergoal 1    (run inside the GC topic that should receive scheduled goalboard reports)
 #
 #   EVERYONE (in registered team groups):
 #     Sales input: +amount #tag
@@ -25,8 +27,8 @@
 #     /cleargoalboardoverride, /clearpageoverride
 # ==========================================
 
-11from telegram import Update
-11from telegram.ext import (
+from telegram import Update
+from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     ContextTypes, filters
 )
@@ -90,7 +92,7 @@ ALLOWED_PAGES = {
     "#claire": "Claire",
 
     "#cocofree": "Coco Free",
-    "#cocopaid": "Coco Paid",  # FIXED: was "#cocopaID" which would never match .lower()
+    "#cocopaid": "Coco Paid",  # fixed
 
     "#cyndiecynthiacolby": "Cyndie, Cynthia & Colby",
 
@@ -195,15 +197,6 @@ def clean(text: str):
 def now_ph() -> datetime:
     return datetime.now(PH_TZ)
 
-def parse_ts(iso_str: str) -> datetime:
-    return datetime.fromisoformat(iso_str)
-
-def split_internal(internal: str):
-    parts = internal.split("|", 1)
-    if len(parts) != 2:
-        return internal, ""
-    return parts[0], parts[1]
-
 def normalize_page(raw_page: str):
     if not raw_page:
         return None
@@ -291,10 +284,12 @@ def init_db():
             page_total  NUMERIC NOT NULL DEFAULT 0
         );
 
-        -- NEW: which GC receives scheduled goalboard reports (per team)
+        -- report destination per team
+        -- NEW: thread_id = Telegram topic id (message_thread_id). If NULL, posts in General.
         CREATE TABLE IF NOT EXISTS report_groups (
             team TEXT PRIMARY KEY,
-            chat_id BIGINT NOT NULL
+            chat_id BIGINT NOT NULL,
+            thread_id BIGINT
         );
         """)
 
@@ -370,7 +365,7 @@ def db_clear_shift_goals():
     with db.cursor() as cur:
         cur.execute("DELETE FROM shift_goals")
 
-def db_upsert_override(page: str, shift_total: float | None = None, page_total: float | None = None):
+def db_upsert_override(page: str, shift_total=None, page_total=None):
     with db.cursor() as cur:
         cur.execute(
             "INSERT INTO manual_overrides (page, shift_total, page_total) VALUES (%s, 0, 0) ON CONFLICT (page) DO NOTHING",
@@ -391,22 +386,26 @@ def db_clear_override_page(page: str):
         cur.execute("UPDATE manual_overrides SET page_total=0 WHERE page=%s", (page,))
         cur.execute("DELETE FROM manual_overrides WHERE page=%s AND shift_total=0 AND page_total=0", (page,))
 
-def db_set_report_group(team: str, chat_id: int):
+def db_set_report_group(team: str, chat_id: int, thread_id: int | None):
     with db.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO report_groups (team, chat_id)
-            VALUES (%s, %s)
+            INSERT INTO report_groups (team, chat_id, thread_id)
+            VALUES (%s, %s, %s)
             ON CONFLICT (team)
-            DO UPDATE SET chat_id = EXCLUDED.chat_id;
+            DO UPDATE SET chat_id = EXCLUDED.chat_id,
+                          thread_id = EXCLUDED.thread_id;
             """,
-            (team, chat_id)
+            (team, chat_id, thread_id)
         )
 
 def db_get_report_groups():
     with db.cursor() as cur:
-        cur.execute("SELECT team, chat_id FROM report_groups")
-        return [(str(t), int(cid)) for (t, cid) in cur.fetchall()]
+        cur.execute("SELECT team, chat_id, thread_id FROM report_groups")
+        out = []
+        for (t, cid, th) in cur.fetchall():
+            out.append((str(t), int(cid), int(th) if th is not None else None))
+        return out
 
 def load_from_db():
     GROUP_TEAMS.clear()
@@ -587,8 +586,11 @@ async def listadmins(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def registergoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    OWNER runs this in the GC that should RECEIVE the scheduled goalboard reports.
-    Example: /registergoal 1  -> registers this GC for Team 1
+    OWNER runs this in the GC or TOPIC that should RECEIVE the scheduled goalboard reports.
+    If you run it inside a Topic (like PAGE STATS), message_thread_id will be saved,
+    so scheduled stats post ONLY in that topic.
+
+    Example: /registergoal 1  -> registers this GC/TOPIC for Team 1
              /registergoal Team 1 -> also works
     """
     if update.effective_chat.type == "private":
@@ -598,15 +600,25 @@ async def registergoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         return await update.message.reply_text(
             "Format: /registergoal 1\n"
-            "This registers THIS GC as the scheduled goalboard report group for Team 1."
+            "Run it inside the TOPIC you want (e.g., PAGE STATS) to send scheduled stats there."
         )
 
     arg = clean(" ".join(context.args)).strip()
     team = f"Team {arg}" if arg.isdigit() else arg
 
-    db_set_report_group(team, update.effective_chat.id)
+    chat_id = update.effective_chat.id
+    # This is the magic: topic id if command is executed inside a topic
+    thread_id = None
+    if update.effective_message:
+        thread_id = update.effective_message.message_thread_id  # None if executed in General (non-topic message)
+
+    db_set_report_group(team, chat_id, thread_id)
+
+    where = "General" if not thread_id else f"Topic (thread_id={thread_id})"
     await update.message.reply_text(
-        f"✅ Registered this GC for scheduled GOALBOARD reports.\nTeam: {team}\n"
+        f"✅ Registered this destination for scheduled GOALBOARD reports.\n"
+        f"Team: {team}\n"
+        f"Posts to: {where}\n\n"
         "Schedule: 8AM, 10AM, 12PM, 2PM, 4PM, 6PM, 8PM, 10PM (PH)"
     )
 
@@ -618,10 +630,6 @@ async def handle_sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
     team = get_team(update.effective_chat.id)
     if team is None:
         return
-
-    user = update.message.from_user
-    username = clean(user.username or user.first_name)
-    _internal = f"{username}|{team}"
 
     saved = False
     unknown_tags = set()
@@ -1022,7 +1030,9 @@ async def cleargoalboardoverride(update: Update, context: ContextTypes.DEFAULT_T
 
     raw = update.message.text.replace("/cleargoalboardoverride", "", 1).strip()
     if not raw:
-        return await update.message.reply_text("Format: /cleargoalboardoverride PAGE\nExample: /cleargoalboardoverride AUTUMN PAID")
+        return await update.message.reply_text(
+            "Format: /cleargoalboardoverride PAGE\nExample: /cleargoalboardoverride AUTUMN PAID"
+        )
 
     page = canonicalize_page_name(raw)
     if page is None:
@@ -1041,7 +1051,9 @@ async def clearpageoverride(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     raw = update.message.text.replace("/clearpageoverride", "", 1).strip()
     if not raw:
-        return await update.message.reply_text("Format: /clearpageoverride PAGE\nExample: /clearpageoverride AUTUMN PAID")
+        return await update.message.reply_text(
+            "Format: /clearpageoverride PAGE\nExample: /clearpageoverride AUTUMN PAID"
+        )
 
     page = canonicalize_page_name(raw)
     if page is None:
@@ -1061,7 +1073,6 @@ def _build_goalboard_table_lines(team: str, start: datetime):
     now = now_ph()
     label = current_shift_label(now)
 
-    # shift totals from DB
     with db.cursor() as cur:
         cur.execute(
             """
@@ -1078,31 +1089,25 @@ def _build_goalboard_table_lines(team: str, start: datetime):
     for page, total in rows:
         totals[str(page)] = float(total)
 
-    # apply overrides (non-zero)
     for page, val in manual_shift_totals.items():
         if float(val) != 0:
             totals[page] = float(val)
 
-    # include ALL pages (even if 0 sales)
     all_pages = sorted(set(ALLOWED_PAGES.values()) | set(shift_goals.keys()) | set(totals.keys()))
 
-    # column widths (tweak-safe)
-    # page names can be long, so we cap them to keep the table readable in Telegram
     PAGE_W = 26
     SALES_W = 10
     GOAL_W = 10
     PCT_W = 7
-    STAT_W = 2
 
     def trunc(s: str, w: int):
         s = str(s)
         if len(s) <= w:
             return s.ljust(w)
-        return (s[: w - 1] + "…")  # keep width-ish; Telegram monospace is fine
+        return (s[: w - 1] + "…")
 
     table_rows = []
     grand_sales = 0.0
-    grand_goal = 0.0
 
     for page in all_pages:
         amt = float(totals.get(page, 0.0))
@@ -1112,8 +1117,6 @@ def _build_goalboard_table_lines(team: str, start: datetime):
         color = get_color(pct) if goal > 0 else "⚪"
 
         grand_sales += amt
-        if goal > 0:
-            grand_goal += goal
 
         row = (
             f"{color} "
@@ -1132,7 +1135,6 @@ def _build_goalboard_table_lines(team: str, start: datetime):
         f"💰 Shift Total: ${grand_sales:.2f}\n"
     )
 
-    # table header line
     col_header = (
         f"   {'PAGE'.ljust(PAGE_W)} "
         f"{'SALES'.rjust(SALES_W)} "
@@ -1146,6 +1148,7 @@ def _build_goalboard_table_lines(team: str, start: datetime):
 async def send_scheduled_goalboard(context: ContextTypes.DEFAULT_TYPE):
     """
     Sends the GOALBOARD TABLE (all pages) to each registered report GC.
+    If thread_id is set, posts ONLY in that Topic.
     Splits into chunks of 50 rows per message.
     """
     now = now_ph()
@@ -1155,42 +1158,48 @@ async def send_scheduled_goalboard(context: ContextTypes.DEFAULT_TYPE):
     if not report_groups:
         return
 
-    for team, chat_id in report_groups:
+    for team, chat_id, thread_id in report_groups:
         header_text, lines = _build_goalboard_table_lines(team, start)
 
-        # chunk rows: Telegram message length limit exists; also user asked 50 rows per message
         chunk_size = 50
-        # lines includes table header + sep + data rows
-        table_head = lines[:2]  # header + sep
+        table_head = lines[:2]
         data_rows = lines[2:]
 
-        # if there are no pages for some reason
         if not data_rows:
             msg = header_text + "\nNo pages found."
             try:
-                await context.application.bot.send_message(chat_id=chat_id, text=msg)
+                await context.application.bot.send_message(
+                    chat_id=chat_id,
+                    text=msg,
+                    message_thread_id=thread_id if thread_id else None
+                )
             except Exception:
                 pass
             continue
 
-        # send in chunks
         for i in range(0, len(data_rows), chunk_size):
             chunk = data_rows[i:i + chunk_size]
             part = (i // chunk_size) + 1
             total_parts = ((len(data_rows) - 1) // chunk_size) + 1
 
-            # Put the big header only on the first message to avoid spam
             prefix = header_text if i == 0 else f"🎯 GOALBOARD — {team} (Part {part}/{total_parts})\n"
-
             msg = prefix + "\n" + "```\n" + "\n".join(table_head + chunk) + "\n```"
 
             try:
-                await context.application.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+                await context.application.bot.send_message(
+                    chat_id=chat_id,
+                    text=msg,
+                    parse_mode="Markdown",
+                    message_thread_id=thread_id if thread_id else None
+                )
             except Exception:
-                # fallback without Markdown if Telegram complains
                 try:
                     msg2 = prefix + "\n" + "\n".join(table_head + chunk)
-                    await context.application.bot.send_message(chat_id=chat_id, text=msg2)
+                    await context.application.bot.send_message(
+                        chat_id=chat_id,
+                        text=msg2,
+                        message_thread_id=thread_id if thread_id else None
+                    )
                 except Exception:
                     pass
 
@@ -1199,7 +1208,6 @@ def main():
     init_db()
     load_from_db()
 
-    # IMPORTANT: timezone set so run_daily uses PH time correctly
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # sales input
@@ -1214,7 +1222,7 @@ def main():
     app.add_handler(CommandHandler("registeradmin", registeradmin))
     app.add_handler(CommandHandler("unregisteradmin", unregisteradmin))
     app.add_handler(CommandHandler("listadmins", listadmins))
-    app.add_handler(CommandHandler("registergoal", registergoal))  # NEW
+    app.add_handler(CommandHandler("registergoal", registergoal))
 
     # everyone
     app.add_handler(CommandHandler("pages", pages))
@@ -1233,8 +1241,6 @@ def main():
     app.add_handler(CommandHandler("quotamonth", quotamonth))
     app.add_handler(CommandHandler("editgoalboard", editgoalboard))
     app.add_handler(CommandHandler("editpagegoals", editpagegoals))
-
-    # single-page override clearing
     app.add_handler(CommandHandler("cleargoalboardoverride", cleargoalboardoverride))
     app.add_handler(CommandHandler("clearpageoverride", clearpageoverride))
 
@@ -1252,6 +1258,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
