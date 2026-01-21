@@ -4,21 +4,29 @@
 #   - Loads everything from DB on startup
 #   - Auto-sends GOALBOARD TABLE every 2 hours (8AM, 10AM, 12PM... PH)
 #
-#   ✅ NEW: /registergoalall
-#     - Run INSIDE the TOPIC you want (PAGE STATS topic)
-#     - Bot will auto-send GOALBOARD for ALL TEAMS into that topic
+#   ✅ /registergoal 1
+#     - per-team destination (run inside a topic to save message_thread_id)
+#
+#   ✅ /registergoalall
+#     - GLOBAL destination (run inside a topic)
+#     - bot auto-sends GOALBOARD for ALL TEAMS into that topic
+#
+#   ✅ /resetdaily
+#     - deletes TODAY’s sales for the current team (00:00 PH -> now)
+#     - shift "reset" still works automatically (because goalboard filters by shift start)
 #
 #   OWNER ONLY (OWNER_ID):
 #     /registerteam Team 1
 #     /unregisterteam
-#     /registeradmin 1
-#     /unregisteradmin
+#     /registeradmin 1   (reply to user OR run alone to self-register)
+#     /unregisteradmin   (reply or /unregisteradmin <user_id>)
 #     /listadmins
-#     /registergoal 1         (per-team destination)
-#     /registergoalall        (global destination for ALL teams)
+#     /registergoal 1
+#     /registergoalall
+#     /resetdaily
 #
-#   EVERYONE:
-#     Sales input: +amount #tag
+#   EVERYONE (in registered team groups):
+#     Sales input: +amount #tag   (supports "*+100 #tag" too)
 #     /pages, /leaderboard, /goalboard, /redpages, /setgoal
 #
 #   BOT-ADMINS (level >= 1):
@@ -178,11 +186,11 @@ ALLOWED_PAGES = {
 GROUP_TEAMS = {}  # chat_id -> team name
 CHAT_ADMINS = defaultdict(dict)  # chat_id -> {user_id: level}
 
-shift_goals = defaultdict(float)
-page_goals = defaultdict(float)
+shift_goals = defaultdict(float)  # page -> goal
+page_goals = defaultdict(float)   # page -> goal
 
-manual_shift_totals = defaultdict(float)
-manual_page_totals = defaultdict(float)
+manual_shift_totals = defaultdict(float)  # page -> override amount
+manual_page_totals = defaultdict(float)   # page -> override amount
 
 # ---------------- UTIL ----------------
 def clean(text: str):
@@ -199,6 +207,9 @@ def clean(text: str):
 
 def now_ph() -> datetime:
     return datetime.now(PH_TZ)
+
+def day_start_ph(dt: datetime) -> datetime:
+    return datetime(dt.year, dt.month, dt.day, 0, 0, 0, tzinfo=PH_TZ)
 
 def normalize_page(raw_page: str):
     if not raw_page:
@@ -294,7 +305,7 @@ def init_db():
             thread_id BIGINT
         );
 
-        -- ✅ GLOBAL destination for ALL teams
+        -- GLOBAL destination for ALL teams
         CREATE TABLE IF NOT EXISTS global_report_dest (
             id INT PRIMARY KEY DEFAULT 1,
             chat_id BIGINT NOT NULL,
@@ -302,7 +313,7 @@ def init_db():
         );
         """)
 
-        # safety migrations
+        # safety migrations (in case table existed earlier)
         cur.execute("""ALTER TABLE report_groups ADD COLUMN IF NOT EXISTS thread_id BIGINT;""")
         cur.execute("""ALTER TABLE global_report_dest ADD COLUMN IF NOT EXISTS thread_id BIGINT;""")
 
@@ -381,7 +392,8 @@ def db_clear_shift_goals():
 def db_upsert_override(page: str, shift_total=None, page_total=None):
     with db.cursor() as cur:
         cur.execute(
-            "INSERT INTO manual_overrides (page, shift_total, page_total) VALUES (%s, 0, 0) ON CONFLICT (page) DO NOTHING",
+            "INSERT INTO manual_overrides (page, shift_total, page_total) VALUES (%s, 0, 0) "
+            "ON CONFLICT (page) DO NOTHING",
             (page,)
         )
         if shift_total is not None:
@@ -420,7 +432,6 @@ def db_get_report_groups():
             out.append((str(t), int(cid), int(th) if th is not None else None))
         return out
 
-# ✅ GLOBAL DEST helpers
 def db_set_global_report_dest(chat_id: int, thread_id):
     with db.cursor() as cur:
         cur.execute(
@@ -442,6 +453,19 @@ def db_get_global_report_dest():
             return None
         chat_id, thread_id = row
         return int(chat_id), (int(thread_id) if thread_id is not None else None)
+
+def db_list_all_teams() -> list[str]:
+    with db.cursor() as cur:
+        cur.execute("SELECT DISTINCT name FROM teams ORDER BY name ASC")
+        return [str(r[0]) for r in cur.fetchall()]
+
+def db_reset_daily_sales(team: str):
+    start = day_start_ph(now_ph())
+    with db.cursor() as cur:
+        cur.execute(
+            "DELETE FROM sales WHERE team=%s AND ts >= %s",
+            (team, start)
+        )
 
 def load_from_db():
     GROUP_TEAMS.clear()
@@ -547,8 +571,10 @@ async def registeradmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("Run this command inside the team group (not in private).")
     if not await require_owner(update):
         return
+
     if not context.args:
         return await update.message.reply_text("Format: /registeradmin 1\nTip: reply to a user then run /registeradmin 1")
+
     try:
         level = int(context.args[0])
     except ValueError:
@@ -642,7 +668,6 @@ async def registergoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Schedule: 8AM, 10AM, 12PM, 2PM, 4PM, 6PM, 8PM, 10PM (PH)"
     )
 
-# ✅ NEW: GLOBAL register for ALL teams
 async def registergoalall(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == "private":
         return await update.message.reply_text("Run this command inside the target GC (not in private).")
@@ -664,6 +689,18 @@ async def registergoalall(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Schedule: 8AM, 10AM, 12PM, 2PM, 4PM, 6PM, 8PM, 10PM (PH)"
     )
 
+async def resetdaily(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    team = await require_team(update)
+    if team is None:
+        return
+    if not await require_owner(update):
+        return
+
+    db_reset_daily_sales(team)
+    await update.message.reply_text(
+        f"🧹 Daily reset complete for {team}.\nDeleted TODAY’s sales only (00:00 PH → now)."
+    )
+
 # ----------------- SALES HANDLER -----------------
 async def handle_sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
@@ -679,7 +716,7 @@ async def handle_sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for raw in update.message.text.splitlines():
         line = raw.strip()
-        # allow *+100, •+100, -+100 etc
+        # allow "*+100 #tag", "•+100 #tag", "-+100 #tag"
         line = line.lstrip("*•- ").strip()
         if not line.startswith("+"):
             continue
@@ -1021,13 +1058,16 @@ async def editgoalboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     page = canonicalize_page_name(page_str)
     if page is None:
-        return await update.message.reply_text("Invalid page/tag. Use a valid page name or hashtag tag.")
+        return await update.message.reply_text_
+        "Invalid page/tag. Use a valid page name or hashtag tag."
+    )
 
     try:
         amount = float(amount_str)
     except ValueError:
         return await update.message.reply_text("Amount must be a number.")
 
+    # override BOTH shift + period totals
     manual_shift_totals[page] = amount
     manual_page_totals[page] = amount
     db_upsert_override(page, shift_total=amount, page_total=amount)
@@ -1109,6 +1149,11 @@ async def clearpageoverride(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ----------------- SCHEDULED GOALBOARD (TABLE) -----------------
 def _build_goalboard_table_lines(team: str, start: datetime):
+    """
+    Returns:
+      header_text: str
+      rows: list[str]  (each row already formatted monospaced)
+    """
     now = now_ph()
     label = current_shift_label(now)
 
@@ -1128,10 +1173,12 @@ def _build_goalboard_table_lines(team: str, start: datetime):
     for page, total in rows:
         totals[str(page)] = float(total)
 
+    # apply overrides (shift)
     for page, val in manual_shift_totals.items():
         if float(val) != 0:
             totals[page] = float(val)
 
+    # show every known page (allowed + goals + totals)
     all_pages = sorted(set(ALLOWED_PAGES.values()) | set(shift_goals.keys()) | set(totals.keys()))
 
     PAGE_W = 26
@@ -1186,17 +1233,21 @@ def _build_goalboard_table_lines(team: str, start: datetime):
 
 async def send_scheduled_goalboard(context: ContextTypes.DEFAULT_TYPE):
     """
+    Sends GOALBOARD TABLES (all pages) on schedule.
+
     Priority:
-      1) If /registergoalall exists -> send ALL teams to that one topic/chat
-      2) Else -> send per-team destinations from /registergoal
+      1) If GLOBAL destination exists -> send ALL TEAMS there.
+      2) Else -> send per-team destinations from report_groups.
     """
     now = now_ph()
     start = shift_start(now)
 
     global_dest = db_get_global_report_dest()
+
+    # ---------------- GLOBAL MODE ----------------
     if global_dest:
-        global_chat_id, global_thread_id = global_dest
-        teams = sorted(set(GROUP_TEAMS.values()))
+        dest_chat_id, dest_thread_id = global_dest
+        teams = db_list_all_teams()
         if not teams:
             return
 
@@ -1211,9 +1262,9 @@ async def send_scheduled_goalboard(context: ContextTypes.DEFAULT_TYPE):
                 msg = header_text + "\nNo pages found."
                 try:
                     await context.application.bot.send_message(
-                        chat_id=global_chat_id,
+                        chat_id=dest_chat_id,
                         text=msg,
-                        message_thread_id=global_thread_id if global_thread_id else None
+                        message_thread_id=dest_thread_id if dest_thread_id else None
                     )
                 except Exception:
                     pass
@@ -1229,24 +1280,24 @@ async def send_scheduled_goalboard(context: ContextTypes.DEFAULT_TYPE):
 
                 try:
                     await context.application.bot.send_message(
-                        chat_id=global_chat_id,
+                        chat_id=dest_chat_id,
                         text=msg,
                         parse_mode="Markdown",
-                        message_thread_id=global_thread_id if global_thread_id else None
+                        message_thread_id=dest_thread_id if dest_thread_id else None
                     )
                 except Exception:
                     try:
                         msg2 = prefix + "\n" + "\n".join(table_head + chunk)
                         await context.application.bot.send_message(
-                            chat_id=global_chat_id,
+                            chat_id=dest_chat_id,
                             text=msg2,
-                            message_thread_id=global_thread_id if global_thread_id else None
+                            message_thread_id=dest_thread_id if dest_thread_id else None
                         )
                     except Exception:
                         pass
         return
 
-    # fallback: per-team destinations
+    # ---------------- PER-TEAM MODE ----------------
     report_groups = db_get_report_groups()
     if not report_groups:
         return
@@ -1303,7 +1354,7 @@ def main():
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # sales input
+    # sales input (must be before anything else)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_sales))
 
     # basic
@@ -1317,6 +1368,7 @@ def main():
     app.add_handler(CommandHandler("listadmins", listadmins))
     app.add_handler(CommandHandler("registergoal", registergoal))
     app.add_handler(CommandHandler("registergoalall", registergoalall))
+    app.add_handler(CommandHandler("resetdaily", resetdaily))
 
     # everyone
     app.add_handler(CommandHandler("pages", pages))
@@ -1325,7 +1377,7 @@ def main():
     app.add_handler(CommandHandler("redpages", redpages))
     app.add_handler(CommandHandler("setgoal", setgoal))
 
-    # bot-admin
+    # bot-admin (level >= 1)
     app.add_handler(CommandHandler("pagegoal", pagegoal))
     app.add_handler(CommandHandler("viewshiftgoals", viewshiftgoals))
     app.add_handler(CommandHandler("viewpagegoals", viewpagegoals))
