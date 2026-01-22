@@ -1454,7 +1454,7 @@ def _build_goalboard_table_lines(team: str, start: datetime):
     )
     sep = "-" * (3 + PAGE_W + 1 + SALES_W + 1 + GOAL_W + 1 + PCT_W)
 
-      return header_text, [col_header, sep] + table_rows
+    return header_text, [col_header, sep] + table_rows
 
 
 def _chunk_team_table_messages(team: str, header_text: str, lines: list[str]) -> list[str]:
@@ -1618,3 +1618,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
