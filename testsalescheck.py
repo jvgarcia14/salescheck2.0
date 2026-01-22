@@ -18,6 +18,10 @@
 #         • were used by that team before (saved in team_pages)
 #     - This stops the “HUGE TABLE” problem.
 #
+#   ✅ FIX: NO MORE DUPLICATE PAGES (brittanyamain vs Brittanya Main, cocopaid vs Coco Paid, etc.)
+#     - ALL reads/writes are normalized to a single canonical display name (ALLOWED_PAGES value)
+#     - Old DB rows are merged in output automatically (no need to wipe data)
+#
 #   ✅ NO MORE SILENT FAILURES
 #     - logs RetryAfter (flood control), message-too-long, etc. in Railway logs
 #     - safe_send retries once after RetryAfter
@@ -33,7 +37,6 @@
 import os
 import asyncio
 import traceback
-import html
 from collections import defaultdict
 from datetime import datetime, timedelta, time
 from zoneinfo import ZoneInfo
@@ -187,6 +190,59 @@ ALLOWED_PAGES = {
     "#skypaidfree": "Sky Paid / Free",
 }
 
+# ----------------- CANONICALIZATION (FIX DUPLICATES) -----------------
+def _slugify(s: str) -> str:
+    # keep only alphanumerics, lowercase
+    return "".join(ch.lower() for ch in str(s) if ch.isalnum())
+
+# map: allowed_key_without_hash -> display
+_KEY_NOHASH_TO_DISPLAY = {k.lstrip("#").lower(): v for k, v in ALLOWED_PAGES.items()}
+# map: slug(allowed_key_without_hash) -> display
+_SLUGKEY_TO_DISPLAY = {_slugify(k.lstrip("#")): v for k, v in ALLOWED_PAGES.items()}
+# map: lower(display) -> display (canonical display)
+_DISPLAY_LOWER_TO_DISPLAY = {v.lower(): v for v in ALLOWED_PAGES.values()}
+# map: slug(display) -> display
+_SLUGDISPLAY_TO_DISPLAY = {_slugify(v): v for v in ALLOWED_PAGES.values()}
+
+def canonical_page(value: str | None) -> str | None:
+    """
+    Converts anything ( '#tag', 'tag', 'brittanyamain', 'Brittanya Main', etc.)
+    into ONE canonical display name (the ALLOWED_PAGES value).
+    Returns None if empty/invalid.
+    """
+    if value is None:
+        return None
+
+    raw = str(value).strip()
+    if not raw:
+        return None
+
+    token = raw.split()[0].strip()
+    low = token.lower()
+
+    # 1) hashtag tag -> ALLOWED_PAGES
+    if low.startswith("#"):
+        return ALLOWED_PAGES.get(low)
+
+    # 2) exact key without hash (common DB old rows: "brittanyamain", "cocopaid")
+    if low in _KEY_NOHASH_TO_DISPLAY:
+        return _KEY_NOHASH_TO_DISPLAY[low]
+
+    # 3) exact display name (case-insensitive)
+    if raw.lower() in _DISPLAY_LOWER_TO_DISPLAY:
+        return _DISPLAY_LOWER_TO_DISPLAY[raw.lower()]
+
+    # 4) slug match fallback
+    slug = _slugify(raw)
+    if slug in _SLUGKEY_TO_DISPLAY:
+        return _SLUGKEY_TO_DISPLAY[slug]
+    if slug in _SLUGDISPLAY_TO_DISPLAY:
+        return _SLUGDISPLAY_TO_DISPLAY[slug]
+
+    # If it isn't recognized, keep the cleaned raw as-is (prevents losing custom pages),
+    # but normalize whitespace/casing minimally:
+    return raw
+
 # ----------------- IN-MEM CACHE (loaded from DB) -----------------
 GROUP_TEAMS = {}  # chat_id -> team name
 CHAT_ADMINS = defaultdict(dict)  # chat_id -> {user_id: level}
@@ -217,6 +273,7 @@ def day_start_ph(dt: datetime) -> datetime:
     return datetime(dt.year, dt.month, dt.day, 0, 0, 0, tzinfo=PH_TZ)
 
 def normalize_page(raw_page: str):
+    # kept for sales parsing (+1000 #tag)
     if not raw_page:
         return None
     token = raw_page.strip().split()[0].lower()
@@ -225,12 +282,11 @@ def normalize_page(raw_page: str):
     return ALLOWED_PAGES.get(token)
 
 def canonicalize_page_name(page_str: str):
+    # used in commands where user types PAGE or #TAG
     page_str = clean(page_str)
     if not page_str:
         return None
-    if page_str.lower().startswith("#"):
-        return ALLOWED_PAGES.get(page_str.lower())
-    return page_str
+    return canonical_page(page_str)
 
 def current_shift_label(dt: datetime) -> str:
     dt = dt.astimezone(PH_TZ)
@@ -366,6 +422,8 @@ def db_delete_admin(chat_id: int, user_id: int):
         cur.execute("DELETE FROM admins WHERE chat_id=%s AND user_id=%s", (chat_id, user_id))
 
 def db_add_sale(team: str, page: str, amount: float, ts_iso: str):
+    # ALWAYS store canonical page name
+    page = canonical_page(page) or page
     with db.cursor() as cur:
         cur.execute(
             "INSERT INTO sales (team, page, amount, ts) VALUES (%s, %s, %s, %s)",
@@ -373,6 +431,8 @@ def db_add_sale(team: str, page: str, amount: float, ts_iso: str):
         )
 
 def db_add_team_page(team: str, page: str):
+    # ALWAYS store canonical page name
+    page = canonical_page(page) or page
     with db.cursor() as cur:
         cur.execute(
             """
@@ -386,9 +446,19 @@ def db_add_team_page(team: str, page: str):
 def db_get_team_pages(team: str):
     with db.cursor() as cur:
         cur.execute("SELECT page FROM team_pages WHERE team=%s", (team,))
-        return [str(r[0]) for r in cur.fetchall()]
+        rows = [str(r[0]) for r in cur.fetchall()]
+    # normalize + dedupe
+    out = []
+    seen = set()
+    for p in rows:
+        cp = canonical_page(p) or p
+        if cp not in seen:
+            seen.add(cp)
+            out.append(cp)
+    return out
 
 def db_upsert_page_goal(page: str, goal: float):
+    page = canonical_page(page) or page
     with db.cursor() as cur:
         cur.execute(
             """
@@ -401,6 +471,7 @@ def db_upsert_page_goal(page: str, goal: float):
         )
 
 def db_upsert_shift_goal(page: str, goal: float):
+    page = canonical_page(page) or page
     with db.cursor() as cur:
         cur.execute(
             """
@@ -421,6 +492,7 @@ def db_clear_shift_goals():
         cur.execute("DELETE FROM shift_goals")
 
 def db_upsert_override(page: str, shift_total=None, page_total=None):
+    page = canonical_page(page) or page
     with db.cursor() as cur:
         cur.execute(
             "INSERT INTO manual_overrides (page, shift_total, page_total) VALUES (%s, 0, 0) "
@@ -433,11 +505,13 @@ def db_upsert_override(page: str, shift_total=None, page_total=None):
             cur.execute("UPDATE manual_overrides SET page_total=%s WHERE page=%s", (page_total, page))
 
 def db_clear_override_shift(page: str):
+    page = canonical_page(page) or page
     with db.cursor() as cur:
         cur.execute("UPDATE manual_overrides SET shift_total=0 WHERE page=%s", (page,))
         cur.execute("DELETE FROM manual_overrides WHERE page=%s AND shift_total=0 AND page_total=0", (page,))
 
 def db_clear_override_page(page: str):
+    page = canonical_page(page) or page
     with db.cursor() as cur:
         cur.execute("UPDATE manual_overrides SET page_total=0 WHERE page=%s", (page,))
         cur.execute("DELETE FROM manual_overrides WHERE page=%s AND shift_total=0 AND page_total=0", (page,))
@@ -515,19 +589,22 @@ def load_from_db():
         for chat_id, user_id, level in cur.fetchall():
             CHAT_ADMINS[int(chat_id)][int(user_id)] = int(level)
 
+        # normalize goal keys
         cur.execute("SELECT page, goal FROM shift_goals")
         for page, goal in cur.fetchall():
-            shift_goals[str(page)] = float(goal)
+            p = canonical_page(str(page)) or str(page)
+            shift_goals[p] = float(goal)
 
         cur.execute("SELECT page, goal FROM page_goals")
         for page, goal in cur.fetchall():
-            page_goals[str(page)] = float(goal)
+            p = canonical_page(str(page)) or str(page)
+            page_goals[p] = float(goal)
 
         cur.execute("SELECT page, shift_total, page_total FROM manual_overrides")
-        for page, s, p in cur.fetchall():
-            page = str(page)
-            manual_shift_totals[page] = float(s)
-            manual_page_totals[page] = float(p)
+        for page, s, p2 in cur.fetchall():
+            p = canonical_page(str(page)) or str(page)
+            manual_shift_totals[p] = float(s)
+            manual_page_totals[p] = float(p2)
 
 # ----------------- ACCESS CONTROL -----------------
 async def require_owner(update: Update) -> bool:
@@ -805,14 +882,15 @@ async def handle_sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             continue
 
-        canonical_page = normalize_page(parts[1])
-        if not canonical_page:
+        canonical_page_name = normalize_page(parts[1])
+        if not canonical_page_name:
             bad_token = parts[1].strip().split()[0]
             unknown_tags.add(bad_token)
             continue
 
-        db_add_sale(team, canonical_page, float(amount), ts_iso)
-        db_add_team_page(team, canonical_page)  # ✅ auto-available for this team
+        # ALWAYS store canonical display name
+        db_add_sale(team, canonical_page_name, float(amount), ts_iso)
+        db_add_team_page(team, canonical_page_name)
         saved = True
 
     if saved:
@@ -855,8 +933,14 @@ async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not rows:
         return await update.message.reply_text("No sales yet.")
 
+    # normalize pages in output (merges old messy DB rows)
+    totals = defaultdict(float)
+    for page, total in rows:
+        p = canonical_page(str(page)) or str(page)
+        totals[p] += float(total)
+
     msg = f"🏆 SALES LEADERBOARD (LIFETIME by Page) — {team}\n\n"
-    for i, (page, total) in enumerate(rows, 1):
+    for i, (page, total) in enumerate(sorted(totals.items(), key=lambda x: x[1], reverse=True), 1):
         msg += f"{i}. {page} — ${float(total):.2f}\n"
     await update.message.reply_text(msg)
 
@@ -888,7 +972,7 @@ async def setgoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         shift_goals[page] = goal
         db_upsert_shift_goal(page, goal)
-        db_add_team_page(team, page)  # ✅ ensures this team can show it
+        db_add_team_page(team, page)
         results.append(f"✓ {page} = ${goal:.2f}")
 
     msg = "🎯 Shift Goals Updated:\n" + ("\n".join(results) if results else "(no valid entries)")
@@ -917,15 +1001,19 @@ async def goalboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         rows = cur.fetchall()
 
+    # normalize + merge duplicates from old DB
     totals = defaultdict(float)
     for page, total in rows:
-        totals[str(page)] += float(total)
+        p = canonical_page(str(page)) or str(page)
+        totals[p] += float(total)
 
-    for page, val in manual_shift_totals.items():
+    # apply overrides (also normalize)
+    for page, val in list(manual_shift_totals.items()):
+        p = canonical_page(page) or page
         if float(val) != 0:
-            totals[page] = float(val)
+            totals[p] = float(val)
 
-    # show only pages that belong to this team OR have sales this shift
+    # normalize team pages
     team_pages = set(db_get_team_pages(team))
     all_pages = sorted(team_pages | set(totals.keys()))
 
@@ -935,7 +1023,6 @@ async def goalboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     msg = f"🎯 GOAL PROGRESS — {team}\n🕒 Shift: {label}\n✅ Shift started: {start.strftime('%b %d, %Y %I:%M %p')} (PH)\n\n"
-    # sort by sales desc
     for page in sorted(all_pages, key=lambda p: totals.get(p, 0.0), reverse=True):
         amt = float(totals.get(page, 0.0))
         goal = float(shift_goals.get(page, 0.0))
@@ -970,13 +1057,14 @@ async def redpages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     totals = defaultdict(float)
     for page, total in rows:
-        totals[str(page)] += float(total)
+        p = canonical_page(str(page)) or str(page)
+        totals[p] += float(total)
 
-    for page, val in manual_shift_totals.items():
+    for page, val in list(manual_shift_totals.items()):
+        p = canonical_page(page) or page
         if float(val) != 0:
-            totals[page] = float(val)
+            totals[p] = float(val)
 
-    # Only pages with a goal can be "red"
     msg = f"🚨 RED PAGES — {team}\n🕒 Shift: {label}\n✅ Shift started: {start.strftime('%b %d, %Y %I:%M %p')} (PH)\n\n"
     any_found = False
 
@@ -1026,7 +1114,7 @@ async def pagegoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         page_goals[page] = goal
         db_upsert_page_goal(page, goal)
-        db_add_team_page(team, page)  # ✅ make it appear for this team
+        db_add_team_page(team, page)
         results.append(f"✓ {page} = ${goal:.2f}")
 
     msg = "📊 Page Goals Updated (15/30 days):\n" + ("\n".join(results) if results else "(no valid entries)")
@@ -1102,7 +1190,6 @@ async def quota_period(update: Update, context: ContextTypes.DEFAULT_TYPE, days:
             FROM sales
             WHERE team=%s AND ts >= %s
             GROUP BY page
-            ORDER BY total DESC
             """,
             (team, cutoff)
         )
@@ -1110,11 +1197,13 @@ async def quota_period(update: Update, context: ContextTypes.DEFAULT_TYPE, days:
 
     totals = defaultdict(float)
     for page, total in rows:
-        totals[str(page)] = float(total)
+        p = canonical_page(str(page)) or str(page)
+        totals[p] += float(total)
 
-    for page, val in manual_page_totals.items():
+    for page, val in list(manual_page_totals.items()):
+        p = canonical_page(page) or page
         if float(val) != 0:
-            totals[page] = float(val)
+            totals[p] = float(val)
 
     if not totals:
         return await update.message.reply_text(f"No sales found for the last {days} days.")
@@ -1152,7 +1241,7 @@ async def editgoalboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("Format: /editgoalboard PAGE AMOUNT")
 
     amount_str = parts[-1]
-    page_str = " ".join(parts[:-1])
+        page_str = " ".join(parts[:-1])
 
     page = canonicalize_page_name(page_str)
     if page is None:
@@ -1166,7 +1255,6 @@ async def editgoalboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     manual_shift_totals[page] = amount
     manual_page_totals[page] = amount
     db_upsert_override(page, shift_total=amount, page_total=amount)
-
     db_add_team_page(team, page)
 
     await update.message.reply_text(
@@ -1261,21 +1349,6 @@ def db_list_team_details():
         )
         return [(str(n), int(c)) for (n, c) in cur.fetchall()]
 
-
-def db_delete_team_by_name(team_name: str):
-    """
-    Deletes ONLY the registrations/config for the team.
-    By design: keeps sales history unless you uncomment the sales delete.
-    """
-    with db.cursor() as cur:
-        cur.execute("DELETE FROM teams WHERE name=%s", (team_name,))
-        cur.execute("DELETE FROM admins WHERE chat_id IN (SELECT chat_id FROM teams WHERE name=%s)", (team_name,))
-        cur.execute("DELETE FROM report_groups WHERE team=%s", (team_name,))
-        cur.execute("DELETE FROM team_pages WHERE team=%s", (team_name,))
-        # OPTIONAL: also delete sales history for that team
-        # cur.execute("DELETE FROM sales WHERE team=%s", (team_name,))
-
-
 async def listteams(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_owner(update):
         return
@@ -1297,7 +1370,6 @@ async def listteams(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(msg)
 
-
 def _resolve_deleteteam_target(arg: str) -> str | None:
     """
     FIXED RULES:
@@ -1312,7 +1384,6 @@ def _resolve_deleteteam_target(arg: str) -> str | None:
     if not teams:
         return None
 
-    # Number means Team N
     if arg.isdigit():
         candidate = f"Team {int(arg)}"
         for name in teams:
@@ -1320,13 +1391,11 @@ def _resolve_deleteteam_target(arg: str) -> str | None:
                 return name
         return None
 
-    # Otherwise: match by name
     for name in teams:
         if name.lower() == arg.lower():
             return name
 
     return None
-
 
 async def deleteteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_owner(update):
@@ -1340,33 +1409,18 @@ async def deleteteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not target:
         return await update.message.reply_text("Team not found.\nUse /listteams to see the exact names.")
 
-    # delete registrations/config
     with db.cursor() as cur:
-        # delete all group registrations for that team
         cur.execute("DELETE FROM teams WHERE name=%s", (target,))
-        # delete per-team report destination
         cur.execute("DELETE FROM report_groups WHERE team=%s", (target,))
-        # delete auto pages map for that team
         cur.execute("DELETE FROM team_pages WHERE team=%s", (target,))
-        # NOTE: sales remain (history)
+        # keep sales history
         # cur.execute("DELETE FROM sales WHERE team=%s", (target,))
 
-    # refresh in-memory maps so bot stops treating those groups as teams
     load_from_db()
-
-    await update.message.reply_text(
-        f"🗑️ Deleted team registration: {target}\n(History sales are kept.)"
-    )
+    await update.message.reply_text(f"🗑️ Deleted team registration: {target}\n(History sales are kept.)")
 
 # ----------------- SCHEDULED GOALBOARD (TABLE) -----------------
 def _build_goalboard_table_lines(team: str, start: datetime):
-    """
-    IMPORTANT FIX:
-      Scheduled goalboard ONLY shows pages that:
-        - had sales in current shift, OR
-        - exist in team_pages for that team (meaning used before OR goal was set)
-      This prevents huge tables.
-    """
     now = now_ph()
     label = current_shift_label(now)
 
@@ -1382,20 +1436,21 @@ def _build_goalboard_table_lines(team: str, start: datetime):
         )
         rows = cur.fetchall()
 
-    # shift totals from sales
+    # normalize + merge duplicates from old DB
     totals = defaultdict(float)
     shift_sales_pages = set()
     for page, total in rows:
-        page = str(page)
-        totals[page] = float(total)
-        shift_sales_pages.add(page)
+        p = canonical_page(str(page)) or str(page)
+        totals[p] += float(total)
+        shift_sales_pages.add(p)
 
-    # apply shift overrides (non-zero)
-    for page, val in manual_shift_totals.items():
+    # apply shift overrides (normalize)
+    for page, val in list(manual_shift_totals.items()):
+        p = canonical_page(page) or page
         if float(val) != 0:
-            totals[page] = float(val)
+            totals[p] = float(val)
 
-    # ✅ Only pages that belong to this team OR had shift sales
+    # only pages that belong to this team OR had shift sales
     team_pages = set(db_get_team_pages(team))
     visible_pages = sorted(team_pages | shift_sales_pages)
 
@@ -1449,12 +1504,7 @@ def _build_goalboard_table_lines(team: str, start: datetime):
 
     return header_text, [col_header, sep] + table_rows
 
-
 def _chunk_team_table_messages(team: str, header_text: str, lines: list[str]) -> list[str]:
-    """
-    One GOALBOARD message per team.
-    If too big -> Part 1/2, Part 2/2 etc (still per team).
-    """
     if len(lines) <= 2:
         return [header_text + "\nNo pages found for this team yet."]
 
@@ -1465,16 +1515,12 @@ def _chunk_team_table_messages(team: str, header_text: str, lines: list[str]) ->
         body = "\n".join(table_head + rows)
         return prefix + "\n" + "```\n" + body + "\n```"
 
-    # Try single message first
     one_msg = build_msg(header_text, data_rows)
     if len(one_msg) <= TG_MAX:
         return [one_msg]
 
-    # Split by TG_SAFE
     parts: list[list[str]] = []
     current: list[str] = []
-
-    # base overhead estimate (prefix + code fences + header lines)
     base_overhead = len(build_msg(f"🎯 GOALBOARD — {team} (Part 1/1)\n", []))
     current_len = base_overhead
 
@@ -1496,7 +1542,6 @@ def _chunk_team_table_messages(team: str, header_text: str, lines: list[str]) ->
         prefix = header_text if i == 1 else f"🎯 GOALBOARD — {team} (Part {i}/{total_parts})\n"
         msg = build_msg(prefix, rows)
 
-        # fallback plain if somehow still too long
         if len(msg) > TG_MAX:
             plain = prefix + "\n" + "\n".join(table_head + rows)
             msgs.append(plain[:TG_MAX])
@@ -1505,14 +1550,13 @@ def _chunk_team_table_messages(team: str, header_text: str, lines: list[str]) ->
 
     return msgs
 
-
 async def send_scheduled_goalboard(context: ContextTypes.DEFAULT_TYPE):
     now = now_ph()
     start = shift_start(now)
 
     global_dest = db_get_global_report_dest()
 
-    # -------- GLOBAL MODE (ALL TEAMS -> one topic) --------
+    # GLOBAL MODE: ALL TEAMS -> one topic
     if global_dest:
         dest_chat_id, dest_thread_id = global_dest
         teams = db_list_all_teams()
@@ -1533,7 +1577,7 @@ async def send_scheduled_goalboard(context: ContextTypes.DEFAULT_TYPE):
                 )
         return
 
-    # -------- PER-TEAM MODE --------
+    # PER-TEAM MODE
     report_groups = db_get_report_groups()
     if not report_groups:
         return
@@ -1611,3 +1655,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
