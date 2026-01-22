@@ -15,26 +15,11 @@
 #     - deletes TODAY’s sales for the current team (00:00 PH -> now)
 #     - shift "reset" still works automatically (because goalboard filters by shift start)
 #
-#   OWNER ONLY (OWNER_ID):
-#     /registerteam Team 1
-#     /unregisterteam
-#     /registeradmin 1   (reply to user OR run alone to self-register)
-#     /unregisteradmin   (reply or /unregisteradmin <user_id>)
-#     /listadmins
-#     /registergoal 1
-#     /registergoalall
-#     /resetdaily
-#
-#   EVERYONE (in registered team groups):
-#     Sales input: +amount #tag   (supports "*+100 #tag" too)
-#     /pages, /leaderboard, /goalboard, /redpages, /setgoal
-#
-#   BOT-ADMINS (level >= 1):
-#     /pagegoal, /viewshiftgoals, /viewpagegoals
-#     /clearshiftgoals, /clearpagegoals
-#     /quotahalf, /quotamonth
-#     /editgoalboard, /editpagegoals
-#     /cleargoalboardoverride, /clearpageoverride
+#   ✅ NEW (AUTO TEAM PAGES)
+#     - Scheduled GOALBOARD will ONLY show pages that exist for that team.
+#     - A page becomes "available" for a team automatically when:
+#         • a sale is recorded for that page, OR
+#         • you set a goal for that page in that team
 # ==========================================
 
 from telegram import Update
@@ -166,6 +151,7 @@ ALLOWED_PAGES = {
 
     "#natalierfree": "Natalie R Free",
     "#natalierpaid": "Natalie R Paid",
+
     "#niapaid": "nia Paid",
 
     "#paris": "Paris",
@@ -231,7 +217,8 @@ def current_shift_label(dt: datetime) -> str:
     t = dt.timetz()
     if time(8, 0, tzinfo=PH_TZ) <= t < time(16, 0, tzinfo=PH_TZ):
         return "Prime (8AM–4PM)"
-    if time(16, 0, tzinfo=PH_TZ) <= t < time(23, 59, 59, tzinfo=PH_TZ):
+    # (small boundary fix: midnight is next shift anyway)
+    if time(16, 0, tzinfo=PH_TZ) <= t < time(23, 59, 60, tzinfo=PH_TZ):
         return "Midshift (4PM–12AM)"
     return "Closing (12AM–8AM)"
 
@@ -240,7 +227,7 @@ def shift_start(dt: datetime) -> datetime:
     t = dt.timetz()
     if time(8, 0, tzinfo=PH_TZ) <= t < time(16, 0, tzinfo=PH_TZ):
         return datetime.combine(d, time(8, 0), PH_TZ)
-    if time(16, 0, tzinfo=PH_TZ) <= t < time(23, 59, 59, tzinfo=PH_TZ):
+    if time(16, 0, tzinfo=PH_TZ) <= t < time(23, 59, 60, tzinfo=PH_TZ):
         return datetime.combine(d, time(16, 0), PH_TZ)
     return datetime.combine(d, time(0, 0), PH_TZ)
 
@@ -311,9 +298,16 @@ def init_db():
             chat_id BIGINT NOT NULL,
             thread_id BIGINT
         );
+
+        -- NEW: per-team available pages (auto)
+        CREATE TABLE IF NOT EXISTS team_pages (
+            team TEXT NOT NULL,
+            page TEXT NOT NULL,
+            PRIMARY KEY (team, page)
+        );
         """)
 
-        # safety migrations (in case table existed earlier)
+        # safety migrations (in case tables existed earlier)
         cur.execute("""ALTER TABLE report_groups ADD COLUMN IF NOT EXISTS thread_id BIGINT;""")
         cur.execute("""ALTER TABLE global_report_dest ADD COLUMN IF NOT EXISTS thread_id BIGINT;""")
 
@@ -333,6 +327,7 @@ def db_delete_team(chat_id: int):
     with db.cursor() as cur:
         cur.execute("DELETE FROM teams WHERE chat_id=%s", (chat_id,))
         cur.execute("DELETE FROM admins WHERE chat_id=%s", (chat_id,))
+        # optional: keep sales/history; NOT deleting sales by default
 
 def db_upsert_admin(chat_id: int, user_id: int, level: int):
     with db.cursor() as cur:
@@ -356,6 +351,22 @@ def db_add_sale(team: str, page: str, amount: float, ts_iso: str):
             "INSERT INTO sales (team, page, amount, ts) VALUES (%s, %s, %s, %s)",
             (team, page, amount, ts_iso)
         )
+
+def db_add_team_page(team: str, page: str):
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO team_pages (team, page)
+            VALUES (%s, %s)
+            ON CONFLICT (team, page) DO NOTHING;
+            """,
+            (team, page)
+        )
+
+def db_get_team_pages(team: str):
+    with db.cursor() as cur:
+        cur.execute("SELECT page FROM team_pages WHERE team=%s", (team,))
+        return [str(r[0]) for r in cur.fetchall()]
 
 def db_upsert_page_goal(page: str, goal: float):
     with db.cursor() as cur:
@@ -737,6 +748,10 @@ async def handle_sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
             continue
 
         db_add_sale(team, canonical_page, float(amount), ts_iso)
+
+        # ✅ AUTO: register this page as "available" for this team
+        db_add_team_page(team, canonical_page)
+
         saved = True
 
     if saved:
@@ -804,9 +819,18 @@ async def setgoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
             errors.append(entry)
             continue
 
-        page = clean(" ".join(parts[:-1]))
+        page_raw = " ".join(parts[:-1])
+        page = canonicalize_page_name(page_raw)
+        if page is None:
+            errors.append(entry)
+            continue
+
         shift_goals[page] = goal
         db_upsert_shift_goal(page, goal)
+
+        # ✅ ensure it shows for this team even before any sale
+        db_add_team_page(team, page)
+
         results.append(f"✓ {page} = ${goal:.2f}")
 
     msg = "🎯 Shift Goals Updated:\n" + ("\n".join(results) if results else "(no valid entries)")
@@ -926,9 +950,18 @@ async def pagegoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
             errors.append(entry)
             continue
 
-        page = clean(" ".join(parts[:-1]))
+        page_raw = " ".join(parts[:-1])
+        page = canonicalize_page_name(page_raw)
+        if page is None:
+            errors.append(entry)
+            continue
+
         page_goals[page] = goal
         db_upsert_page_goal(page, goal)
+
+        # ✅ ensure it shows for this team even before any sale
+        db_add_team_page(team, page)
+
         results.append(f"✓ {page} = ${goal:.2f}")
 
     msg = "📊 Page Goals Updated (15/30 days):\n" + ("\n".join(results) if results else "(no valid entries)")
@@ -1014,6 +1047,7 @@ async def quota_period(update: Update, context: ContextTypes.DEFAULT_TYPE, days:
     for page, total in rows:
         totals[str(page)] = float(total)
 
+    # apply overrides (page totals)
     for page, val in manual_page_totals.items():
         if float(val) != 0:
             totals[page] = float(val)
@@ -1026,20 +1060,23 @@ async def quota_period(update: Update, context: ContextTypes.DEFAULT_TYPE, days:
     msg += f"🗓️ To:   {now_ph().strftime('%b %d, %Y %I:%M %p')} (PH)\n\n"
 
     for page, amt in sorted(totals.items(), key=lambda x: x[1], reverse=True):
-        goal = page_goals.get(page, 0)
+        goal = page_goals.get(page, 0.0)
         if goal:
-            pct = (amt / goal) * 100
+            pct = (amt / goal) * 100.0
             msg += f"{get_color(pct)} {page}: ${amt:.2f} / ${goal:.2f} ({pct:.1f}%)\n"
         else:
             msg += f"⚪ {page}: ${amt:.2f} (no page goal)\n"
 
     await update.message.reply_text(msg)
 
+
 async def quotahalf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await quota_period(update, context, 15, "QUOTA HALF (15 DAYS)")
 
+
 async def quotamonth(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await quota_period(update, context, 30, "QUOTA MONTH (30 DAYS)")
+
 
 async def editgoalboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     team = await require_team(update)
@@ -1058,9 +1095,7 @@ async def editgoalboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     page = canonicalize_page_name(page_str)
     if page is None:
-        return await update.message.reply_text(
-        "Invalid page/tag. Use a valid page name or hashtag tag."
-    )
+        return await update.message.reply_text("Invalid page/tag. Use a valid page name or hashtag tag.")
 
     try:
         amount = float(amount_str)
@@ -1072,9 +1107,13 @@ async def editgoalboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     manual_page_totals[page] = amount
     db_upsert_override(page, shift_total=amount, page_total=amount)
 
+    # ✅ make sure this page exists for this team too
+    db_add_team_page(team, page)
+
     await update.message.reply_text(
         f"✅ Updated totals\nGoalboard (shift): {page} = ${amount:.2f}\nQuotas (15/30): {page} = ${amount:.2f}"
     )
+
 
 async def editpagegoals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     team = await require_team(update)
@@ -1103,7 +1142,11 @@ async def editpagegoals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     manual_page_totals[page] = amount
     db_upsert_override(page, page_total=amount)
 
+    # ✅ ensure it shows for this team
+    db_add_team_page(team, page)
+
     await update.message.reply_text(f"✅ Updated quotas\n{page} = ${amount:.2f} (15/30 days)")
+
 
 async def cleargoalboardoverride(update: Update, context: ContextTypes.DEFAULT_TYPE):
     team = await require_team(update)
@@ -1122,9 +1165,10 @@ async def cleargoalboardoverride(update: Update, context: ContextTypes.DEFAULT_T
     if page is None:
         return await update.message.reply_text("Invalid page/tag. Use a valid page name or hashtag tag.")
 
-    manual_shift_totals[page] = 0
+    manual_shift_totals[page] = 0.0
     db_clear_override_shift(page)
     await update.message.reply_text(f"✅ Cleared goalboard override for {page}.")
+
 
 async def clearpageoverride(update: Update, context: ContextTypes.DEFAULT_TYPE):
     team = await require_team(update)
@@ -1143,20 +1187,17 @@ async def clearpageoverride(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if page is None:
         return await update.message.reply_text("Invalid page/tag. Use a valid page name or hashtag tag.")
 
-    manual_page_totals[page] = 0
+    manual_page_totals[page] = 0.0
     db_clear_override_page(page)
     await update.message.reply_text(f"✅ Cleared quota override for {page}.")
 
+
 # ----------------- SCHEDULED GOALBOARD (TABLE) -----------------
 def _build_goalboard_table_lines(team: str, start: datetime):
-    """
-    Returns:
-      header_text: str
-      rows: list[str]  (each row already formatted monospaced)
-    """
     now = now_ph()
     label = current_shift_label(now)
 
+    # shift totals from DB
     with db.cursor() as cur:
         cur.execute(
             """
@@ -1173,14 +1214,20 @@ def _build_goalboard_table_lines(team: str, start: datetime):
     for page, total in rows:
         totals[str(page)] = float(total)
 
-    # apply overrides (shift)
+    # apply shift overrides (non-zero)
     for page, val in manual_shift_totals.items():
         if float(val) != 0:
             totals[page] = float(val)
 
-    # show every known page (allowed + goals + totals)
-    all_pages = sorted(set(ALLOWED_PAGES.values()) | set(shift_goals.keys()) | set(totals.keys()))
+    # ✅ ONLY show pages that exist for this team
+    team_pages = set(db_get_team_pages(team))
+    team_pages |= set(totals.keys())  # safety (in case)
+    # If you want goals to appear even before sales, keep this:
+    team_pages |= set(shift_goals.keys())
 
+    all_pages = sorted(team_pages)
+
+    # widths
     PAGE_W = 26
     SALES_W = 10
     GOAL_W = 10
@@ -1231,14 +1278,8 @@ def _build_goalboard_table_lines(team: str, start: datetime):
 
     return header_text, [col_header, sep] + table_rows
 
-async def send_scheduled_goalboard(context: ContextTypes.DEFAULT_TYPE):
-    """
-    Sends GOALBOARD TABLES (all pages) on schedule.
 
-    Priority:
-      1) If GLOBAL destination exists -> send ALL TEAMS there.
-      2) Else -> send per-team destinations from report_groups.
-    """
+async def send_scheduled_goalboard(context: ContextTypes.DEFAULT_TYPE):
     now = now_ph()
     start = shift_start(now)
 
@@ -1259,7 +1300,7 @@ async def send_scheduled_goalboard(context: ContextTypes.DEFAULT_TYPE):
             data_rows = lines[2:]
 
             if not data_rows:
-                msg = header_text + "\nNo pages found."
+                msg = header_text + "\nNo pages found for this team yet."
                 try:
                     await context.application.bot.send_message(
                         chat_id=dest_chat_id,
@@ -1310,7 +1351,7 @@ async def send_scheduled_goalboard(context: ContextTypes.DEFAULT_TYPE):
         data_rows = lines[2:]
 
         if not data_rows:
-            msg = header_text + "\nNo pages found."
+            msg = header_text + "\nNo pages found for this team yet."
             try:
                 await context.application.bot.send_message(
                     chat_id=chat_id,
@@ -1347,6 +1388,7 @@ async def send_scheduled_goalboard(context: ContextTypes.DEFAULT_TYPE):
                 except Exception:
                     pass
 
+
 # ----------------- START -----------------
 def main():
     init_db()
@@ -1354,7 +1396,7 @@ def main():
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # sales input (must be before anything else)
+    # sales input
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_sales))
 
     # basic
@@ -1377,7 +1419,7 @@ def main():
     app.add_handler(CommandHandler("redpages", redpages))
     app.add_handler(CommandHandler("setgoal", setgoal))
 
-    # bot-admin (level >= 1)
+    # bot-admin
     app.add_handler(CommandHandler("pagegoal", pagegoal))
     app.add_handler(CommandHandler("viewshiftgoals", viewshiftgoals))
     app.add_handler(CommandHandler("viewpagegoals", viewpagegoals))
@@ -1390,7 +1432,7 @@ def main():
     app.add_handler(CommandHandler("cleargoalboardoverride", cleargoalboardoverride))
     app.add_handler(CommandHandler("clearpageoverride", clearpageoverride))
 
-    # SCHEDULE: every 2 hours starting 8AM (PH)
+    # schedule
     report_hours = [8, 10, 12, 14, 16, 18, 20, 22]
     for h in report_hours:
         app.job_queue.run_daily(
@@ -1402,8 +1444,6 @@ def main():
     print("BOT RUNNING…")
     app.run_polling(close_loop=False)
 
+
 if __name__ == "__main__":
     main()
-
-
-
