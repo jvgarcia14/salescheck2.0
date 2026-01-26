@@ -135,10 +135,14 @@ ALLOWED_PAGES = {
 
     "#isabellaxizziekay": "Isabella x Izzie Kay",
 
+    "#isa": "Isa Amador",
+
     "#islafree": "Isla Free",
     "#islaoftv": "Isla OFTV",
     "#islapaid": "Isla Paid",
     "#islawelcome": "Isla Welcome",
+
+    "#juliavip": "Julia Vip",
 
     "#kayleexjasmyn": "Kaylee X Jasmyn",
 
@@ -150,6 +154,8 @@ ALLOWED_PAGES = {
     "#lilahpaid": "Lilah Paid",
 
     "#livv": "Livv",
+
+    "#madison": "Madison",
 
     "#mathildefree": "Mathilde Free",
     "#mathildepaid": "Mathilde Paid",
@@ -1554,3 +1560,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
