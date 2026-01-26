@@ -1318,8 +1318,6 @@ def main():
     # owner-only
     app.add_handler(CommandHandler("registerteam", registerteam))
     app.add_handler(CommandHandler("unregisterteam", unregisterteam))
-    app.add_handler(CommandHandler("registeradmin", registeradmin))
-    app.add_handler(CommandHandler("unregisteradmin", unregisteradmin))
     app.add_handler(CommandHandler("listadmins", listadmins))
     app.add_handler(CommandHandler("registergoal", registergoal))
     app.add_handler(CommandHandler("registergoalall", registergoalall))
@@ -1361,3 +1359,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
