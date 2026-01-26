@@ -106,8 +106,7 @@ ALLOWED_PAGES = {
     "#cocofree": "Coco Free",
     "#cocopaid": "Coco Paid",
 
-    "#cyndiecynthiacolby": "Cyndie, Cynthia & Colby",
-    "#cynthiafree": "Cyndie, Cynthia & Colby",
+    "#cynthiafree": "Cynthia Free",
 
     "#dandfreeoftv": "Dan D Free / OFTV",
     "#dandpaid": "Dan D Paid",
@@ -1560,4 +1559,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
