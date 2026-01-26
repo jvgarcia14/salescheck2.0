@@ -1,39 +1,41 @@
+
 # ==========================================
-# ULTIMATE SALES + GOAL BOT (RAILWAY) - DB VERSION + AUTO GOALBOARD REPORTS (TOPIC SUPPORT)
-# - Saves sales/goals/admins/teams/overrides to Postgres
-# - Loads everything from DB on startup
+#   ULTIMATE SALES + GOAL BOT (RAILWAY) - DB VERSION + AUTO GOALBOARD REPORTS (TOPIC SUPPORT)
+#   - Saves sales/goals/admins/teams/overrides to Postgres
+#   - Loads everything from DB on startup
 #
-# ✅ /registergoal 1
-#   - per-team destination (run inside a topic to save message_thread_id)
+#   ✅ /registergoal 1
+#     - per-team destination (run inside a topic to save message_thread_id)
 #
-# ✅ /registergoalall
-#   - GLOBAL destination (run inside a topic)
-#   - bot auto-sends GOALBOARD for ALL TEAMS into that topic
-#   - One GOALBOARD message per team
-#   - If a team table is huge: that team becomes Part 1/2, Part 2/2 (still per team)
+#   ✅ /registergoalall
+#     - GLOBAL destination (run inside a topic)
+#     - bot auto-sends GOALBOARD for ALL TEAMS into that topic
+#     - One GOALBOARD message per team
+#     - If a team table is huge: that team becomes Part 1/2, Part 2/2 (still per team)
 #
-# ✅ /resetdaily
-#   - deletes TODAY’s sales for the current team (00:00 PH -> now)
-#   - shift "reset" still works automatically (because goalboard filters by shift start)
+#   ✅ /resetdaily
+#     - deletes TODAY’s sales for the current team (00:00 PH -> now)
+#     - shift "reset" still works automatically (because goalboard filters by shift start)
 #
-# ✅ NEW (AUTO TEAM PAGES)
-#   - Scheduled GOALBOARD will ONLY show pages that exist for that team.
-#   - A page becomes "available" for a team automatically when:
-#       • a sale is recorded for that page, OR
-#       • you set a goal for that page in that team
+#   ✅ NEW (AUTO TEAM PAGES)
+#     - Scheduled GOALBOARD will ONLY show pages that exist for that team.
+#     - A page becomes "available" for a team automatically when:
+#         • a sale is recorded for that page, OR
+#         • you set a goal for that page in that team
 #
-# ✅ NO MORE SILENT FAILURES
-#   - logs RetryAfter (flood control), message-too-long, etc. in Railway logs
+#   ✅ NO MORE SILENT FAILURES
+#     - logs RetryAfter (flood control), message-too-long, etc. in Railway logs
 # ==========================================
 
 import os
 import traceback
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 from zoneinfo import ZoneInfo
 
 import psycopg2
 from telegram import Update
+from telegram.constants import ParseMode
 from telegram.error import RetryAfter, TimedOut, NetworkError, BadRequest
 from telegram.ext import (
     ApplicationBuilder,
@@ -58,8 +60,9 @@ if not BOT_TOKEN:
 db = psycopg2.connect(DATABASE_URL, sslmode="require")
 db.autocommit = True
 
+# Telegram hard limit is 4096 chars/message
 TG_MAX = 4096
-TG_SAFE = 3900
+TG_SAFE = 3900  # leave room for headers/markdown
 
 # ----------------- PAGES -----------------
 ALLOWED_PAGES = {
@@ -67,78 +70,117 @@ ALLOWED_PAGES = {
     "#alannapaid": "Alanna Paid",
     "#alannawelcome": "Alanna Welcome",
     "#alexalana": "Alexa lana",
+
     "#alexis": "Alexis",
+
     "#allyfree": "Ally Free",
     "#allypaid": "Ally Paid",
+
     "#aprilb": "April B",
     "#ashley": "Ashley",
+
     "#asiadollpaidfree": "Asia Doll Paid / Free",
+
     "#autumnfree": "Autumn Free",
     "#autumnpaid": "Autumn Paid",
     "#autumnwelcome": "Autumn Welcome",
+
     "#brifreeoftv": "Bri Free / OFTV",
     "#bripaid": "Bri Paid",
     "#briwelcome": "Bri Welcome",
+
     "#brittanyamain": "Brittanya Main",
     "#brittanyapaidfree": "Brittanya Paid / Free",
+
     "#bronwinfree": "Bronwin Free",
     "#bronwinoftvmcarteroftv": "Bronwin OFTV & MCarter OFTV",
     "#bronwinpaid": "Bronwin Paid",
     "#bronwinwelcome": "Bronwin Welcome",
+
     "#carterpaidfree": "Carter Paid / Free",
+
     "#christipaidfree": "Christi Paid and Free",
+
     "#claire": "Claire",
+
     "#cocofree": "Coco Free",
     "#cocopaid": "Coco Paid",
+
     "#cyndiecynthiacolby": "Cyndie, Cynthia & Colby",
     "#cynthiafree": "Cyndie, Cynthia & Colby",
+
     "#dandfreeoftv": "Dan D Free / OFTV",
     "#dandpaid": "Dan D Paid",
     "#dandwelcome": "Dan D Welcome",
+
     "#emilyraypaidfree": "Emily Ray Paid / Free",
+
     "#essiepaidfree": "Essie Paid / Free",
+
     "#fanslyteam1": "Fansly Team1",
     "#fanslyteam2": "Fansly Team2",
     "#fanslyteam3": "Fansly Team3",
+
     "#gracefree": "Grace Free",
+
     "#haileywfree": "Hailey W Free",
     "#haileywpaid": "Hailey W Paid",
+
     "#hazeyfree": "Hazey Free",
     "#hazeypaid": "Hazey Paid",
     "#hazeywelcome": "Hazey Welcome",
+
     "#honeynoppv": "Honey NO PPV",
     "#honeyvip": "Honey VIP",
+
     "#isabellaxizziekay": "Isabella x Izzie Kay",
+
     "#islafree": "Isla Free",
     "#islaoftv": "Isla OFTV",
     "#islapaid": "Isla Paid",
     "#islawelcome": "Isla Welcome",
+
     "#kayleexjasmyn": "Kaylee X Jasmyn",
+
     "#kissingcousinsxvalerievip": "Kissing Cousins X Valerie VIP",
+
     "#lexipaid": "Lexi Paid",
+
     "#lilahfree": "Lilah Free",
     "#lilahpaid": "Lilah Paid",
+
     "#livv": "Livv",
+
     "#mathildefree": "Mathilde Free",
     "#mathildepaid": "Mathilde Paid",
     "#mathildewelcome": "Mathilde Welcome",
     "#mathildepaidxisaxalexalana": "Mathilde Paid x Isa A x Alexa Lana",
+
     "#michellefree": "Michelle Free",
     "#michellevip": "Michelle VIP",
+
     "#mommycarter": "Mommy Carter",
+
     "#natalialfree": "Natalia L Free",
     "#natalialpaid": "Natalia L Paid",
     "#natalialnicolefansly": "Natalia L, Nicole Fansly",
+
     "#natalierfree": "Natalie R Free",
     "#natalierpaid": "Natalie R Paid",
+
     "#niapaid": "nia Paid",
+
     "#paris": "Paris",
+
     "#popstfree": "Pops T Free",
     "#popstpaid": "Pops T Paid",
+
     "#rubirosefree": "Rubi Rose Free",
     "#rubirosepaid": "Rubi Rose Paid",
+
     "#salah": "Salah",
     "#sarahc": "Sarah C",
+
     "#skypaidfree": "Sky Paid / Free",
 }
 
@@ -146,13 +188,14 @@ ALLOWED_PAGES = {
 GROUP_TEAMS = {}  # chat_id -> team name
 CHAT_ADMINS = defaultdict(dict)  # chat_id -> {user_id: level}
 
-shift_goals = defaultdict(float)          # page -> goal
-page_goals = defaultdict(float)           # page -> goal
+shift_goals = defaultdict(float)  # page -> goal (global per page in this DB schema)
+page_goals = defaultdict(float)   # page -> goal (global per page in this DB schema)
+
 manual_shift_totals = defaultdict(float)  # page -> override amount
 manual_page_totals = defaultdict(float)   # page -> override amount
 
 # ---------------- UTIL ----------------
-def clean(text: str) -> str:
+def clean(text: str):
     if not isinstance(text, str):
         return ""
     return (
@@ -211,101 +254,97 @@ def get_team(chat_id: int):
 def is_owner(update: Update) -> bool:
     return bool(update.effective_user) and update.effective_user.id == OWNER_ID
 
-def get_color(p: float) -> str:
-    if p >= 100:
-        return "💚"
-    if p >= 90:
-        return "🟢"
-    if p >= 61:
-        return "🔵"
-    if p >= 31:
-        return "🟡"
-    if p >= 11:
-        return "🟠"
+def get_color(p):
+    if p >= 100: return "💚"
+    if p >= 90: return "🟢"
+    if p >= 61: return "🔵"
+    if p >= 31: return "🟡"
+    if p >= 11: return "🟠"
     return "🔴"
 
 # ----------------- DB SCHEMA + HELPERS -----------------
 def init_db():
     with db.cursor() as cur:
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS teams (
-                chat_id BIGINT PRIMARY KEY,
-                name TEXT NOT NULL
-            );
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS teams (
+            chat_id BIGINT PRIMARY KEY,
+            name TEXT NOT NULL
+        );
 
-            CREATE TABLE IF NOT EXISTS admins (
-                chat_id BIGINT NOT NULL,
-                user_id BIGINT NOT NULL,
-                level INT NOT NULL DEFAULT 1,
-                PRIMARY KEY (chat_id, user_id)
-            );
+        CREATE TABLE IF NOT EXISTS admins (
+            chat_id BIGINT NOT NULL,
+            user_id BIGINT NOT NULL,
+            level INT NOT NULL DEFAULT 1,
+            PRIMARY KEY (chat_id, user_id)
+        );
 
-            CREATE TABLE IF NOT EXISTS sales (
-                id BIGSERIAL PRIMARY KEY,
-                team TEXT NOT NULL,
-                page TEXT NOT NULL,
-                amount NUMERIC NOT NULL,
-                ts TIMESTAMPTZ NOT NULL DEFAULT now()
-            );
+        CREATE TABLE IF NOT EXISTS sales (
+            id BIGSERIAL PRIMARY KEY,
+            team TEXT NOT NULL,
+            page TEXT NOT NULL,
+            amount NUMERIC NOT NULL,
+            ts TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
 
-            CREATE TABLE IF NOT EXISTS page_goals (
-                page TEXT PRIMARY KEY,
-                goal NUMERIC NOT NULL
-            );
+        CREATE TABLE IF NOT EXISTS page_goals (
+            page TEXT PRIMARY KEY,
+            goal NUMERIC NOT NULL
+        );
 
-            CREATE TABLE IF NOT EXISTS shift_goals (
-                page TEXT PRIMARY KEY,
-                goal NUMERIC NOT NULL
-            );
+        CREATE TABLE IF NOT EXISTS shift_goals (
+            page TEXT PRIMARY KEY,
+            goal NUMERIC NOT NULL
+        );
 
-            CREATE TABLE IF NOT EXISTS manual_overrides (
-                page TEXT PRIMARY KEY,
-                shift_total NUMERIC NOT NULL DEFAULT 0,
-                page_total NUMERIC NOT NULL DEFAULT 0
-            );
+        CREATE TABLE IF NOT EXISTS manual_overrides (
+            page TEXT PRIMARY KEY,
+            shift_total NUMERIC NOT NULL DEFAULT 0,
+            page_total  NUMERIC NOT NULL DEFAULT 0
+        );
 
-            -- per-team destination
-            CREATE TABLE IF NOT EXISTS report_groups (
-                team TEXT PRIMARY KEY,
-                chat_id BIGINT NOT NULL,
-                thread_id BIGINT
-            );
+        -- per-team destination
+        CREATE TABLE IF NOT EXISTS report_groups (
+            team TEXT PRIMARY KEY,
+            chat_id BIGINT NOT NULL,
+            thread_id BIGINT
+        );
 
-            -- GLOBAL destination for ALL teams
-            CREATE TABLE IF NOT EXISTS global_report_dest (
-                id INT PRIMARY KEY DEFAULT 1,
-                chat_id BIGINT NOT NULL,
-                thread_id BIGINT
-            );
+        -- GLOBAL destination for ALL teams
+        CREATE TABLE IF NOT EXISTS global_report_dest (
+            id INT PRIMARY KEY DEFAULT 1,
+            chat_id BIGINT NOT NULL,
+            thread_id BIGINT
+        );
 
-            -- per-team available pages (auto)
-            CREATE TABLE IF NOT EXISTS team_pages (
-                team TEXT NOT NULL,
-                page TEXT NOT NULL,
-                PRIMARY KEY (team, page)
-            );
-            """
-        )
+        -- per-team available pages (auto)
+        CREATE TABLE IF NOT EXISTS team_pages (
+            team TEXT NOT NULL,
+            page TEXT NOT NULL,
+            PRIMARY KEY (team, page)
+        );
+        """)
 
-        # safety migrations / indexes
-        cur.execute("ALTER TABLE report_groups ADD COLUMN IF NOT EXISTS thread_id BIGINT;")
-        cur.execute("ALTER TABLE global_report_dest ADD COLUMN IF NOT EXISTS thread_id BIGINT;")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_sales_team_ts ON sales (team, ts DESC);")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_sales_team_page_ts ON sales (team, page, ts DESC);")
+        # safety migrations
+        cur.execute("""ALTER TABLE report_groups ADD COLUMN IF NOT EXISTS thread_id BIGINT;""")
+        cur.execute("""ALTER TABLE global_report_dest ADD COLUMN IF NOT EXISTS thread_id BIGINT;""")
+        cur.execute("""CREATE INDEX IF NOT EXISTS idx_sales_team_ts ON sales (team, ts DESC);""")
+        cur.execute("""CREATE INDEX IF NOT EXISTS idx_sales_team_page_ts ON sales (team, page, ts DESC);""")
 
 def db_register_team(chat_id: int, team_name: str):
     with db.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO teams (chat_id, name) VALUES (%s, %s)
-            ON CONFLICT (chat_id) DO UPDATE SET name = EXCLUDED.name;
+            INSERT INTO teams (chat_id, name)
+            VALUES (%s, %s)
+            ON CONFLICT (chat_id)
+            DO UPDATE SET name = EXCLUDED.name;
             """,
-            (chat_id, team_name),
+            (chat_id, team_name)
         )
 
 def db_delete_team(chat_id: int):
     with db.cursor() as cur:
+        # remove team + admins; keep sales/history by default
         cur.execute("DELETE FROM teams WHERE chat_id=%s", (chat_id,))
         cur.execute("DELETE FROM admins WHERE chat_id=%s", (chat_id,))
 
@@ -313,10 +352,12 @@ def db_upsert_admin(chat_id: int, user_id: int, level: int):
     with db.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO admins (chat_id, user_id, level) VALUES (%s, %s, %s)
-            ON CONFLICT (chat_id, user_id) DO UPDATE SET level = EXCLUDED.level;
+            INSERT INTO admins (chat_id, user_id, level)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (chat_id, user_id)
+            DO UPDATE SET level = EXCLUDED.level;
             """,
-            (chat_id, user_id, level),
+            (chat_id, user_id, level)
         )
 
 def db_delete_admin(chat_id: int, user_id: int):
@@ -327,17 +368,18 @@ def db_add_sale(team: str, page: str, amount: float, ts_iso: str):
     with db.cursor() as cur:
         cur.execute(
             "INSERT INTO sales (team, page, amount, ts) VALUES (%s, %s, %s, %s)",
-            (team, page, amount, ts_iso),
+            (team, page, amount, ts_iso)
         )
 
 def db_add_team_page(team: str, page: str):
     with db.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO team_pages (team, page) VALUES (%s, %s)
+            INSERT INTO team_pages (team, page)
+            VALUES (%s, %s)
             ON CONFLICT (team, page) DO NOTHING;
             """,
-            (team, page),
+            (team, page)
         )
 
 def db_get_team_pages(team: str):
@@ -345,40 +387,115 @@ def db_get_team_pages(team: str):
         cur.execute("SELECT page FROM team_pages WHERE team=%s", (team,))
         return [str(r[0]) for r in cur.fetchall()]
 
+def db_upsert_page_goal(page: str, goal: float):
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO page_goals (page, goal)
+            VALUES (%s, %s)
+            ON CONFLICT (page)
+            DO UPDATE SET goal = EXCLUDED.goal;
+            """,
+            (page, goal)
+        )
+
 def db_upsert_shift_goal(page: str, goal: float):
     with db.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO shift_goals (page, goal) VALUES (%s, %s)
-            ON CONFLICT (page) DO UPDATE SET goal = EXCLUDED.goal;
+            INSERT INTO shift_goals (page, goal)
+            VALUES (%s, %s)
+            ON CONFLICT (page)
+            DO UPDATE SET goal = EXCLUDED.goal;
             """,
-            (page, goal),
+            (page, goal)
         )
+
+def db_clear_page_goals():
+    with db.cursor() as cur:
+        cur.execute("DELETE FROM page_goals")
+
+def db_clear_shift_goals():
+    with db.cursor() as cur:
+        cur.execute("DELETE FROM shift_goals")
+
+def db_upsert_override(page: str, shift_total=None, page_total=None):
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO manual_overrides (page, shift_total, page_total) VALUES (%s, 0, 0) "
+            "ON CONFLICT (page) DO NOTHING",
+            (page,)
+        )
+        if shift_total is not None:
+            cur.execute("UPDATE manual_overrides SET shift_total=%s WHERE page=%s", (shift_total, page))
+        if page_total is not None:
+            cur.execute("UPDATE manual_overrides SET page_total=%s WHERE page=%s", (page_total, page))
+
+def db_clear_override_shift(page: str):
+    with db.cursor() as cur:
+        cur.execute("UPDATE manual_overrides SET shift_total=0 WHERE page=%s", (page,))
+        cur.execute("DELETE FROM manual_overrides WHERE page=%s AND shift_total=0 AND page_total=0", (page,))
+
+def db_clear_override_page(page: str):
+    with db.cursor() as cur:
+        cur.execute("UPDATE manual_overrides SET page_total=0 WHERE page=%s", (page,))
+        cur.execute("DELETE FROM manual_overrides WHERE page=%s AND shift_total=0 AND page_total=0", (page,))
 
 def db_set_report_group(team: str, chat_id: int, thread_id):
     with db.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO report_groups (team, chat_id, thread_id) VALUES (%s, %s, %s)
-            ON CONFLICT (team) DO UPDATE SET chat_id = EXCLUDED.chat_id, thread_id = EXCLUDED.thread_id;
+            INSERT INTO report_groups (team, chat_id, thread_id)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (team)
+            DO UPDATE SET chat_id = EXCLUDED.chat_id,
+                          thread_id = EXCLUDED.thread_id;
             """,
-            (team, chat_id, thread_id),
+            (team, chat_id, thread_id)
         )
+
+def db_get_report_groups():
+    with db.cursor() as cur:
+        cur.execute("SELECT team, chat_id, thread_id FROM report_groups")
+        out = []
+        for (t, cid, th) in cur.fetchall():
+            out.append((str(t), int(cid), int(th) if th is not None else None))
+        return out
 
 def db_set_global_report_dest(chat_id: int, thread_id):
     with db.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO global_report_dest (id, chat_id, thread_id) VALUES (1, %s, %s)
-            ON CONFLICT (id) DO UPDATE SET chat_id=EXCLUDED.chat_id, thread_id=EXCLUDED.thread_id;
+            INSERT INTO global_report_dest (id, chat_id, thread_id)
+            VALUES (1, %s, %s)
+            ON CONFLICT (id)
+            DO UPDATE SET chat_id=EXCLUDED.chat_id,
+                          thread_id=EXCLUDED.thread_id;
             """,
-            (chat_id, thread_id),
+            (chat_id, thread_id)
         )
+
+def db_get_global_report_dest():
+    with db.cursor() as cur:
+        cur.execute("SELECT chat_id, thread_id FROM global_report_dest WHERE id=1")
+        row = cur.fetchone()
+        if not row:
+            return None
+        chat_id, thread_id = row
+        return int(chat_id), (int(thread_id) if thread_id is not None else None)
+
+def db_list_all_teams() -> list[str]:
+    with db.cursor() as cur:
+        cur.execute("SELECT DISTINCT name FROM teams ORDER BY name ASC")
+        return [str(r[0]) for r in cur.fetchall()]
 
 def db_reset_daily_sales(team: str):
     start = day_start_ph(now_ph())
     with db.cursor() as cur:
-        cur.execute("DELETE FROM sales WHERE team=%s AND ts >= %s", (team, start))
+        cur.execute(
+            "DELETE FROM sales WHERE team=%s AND ts >= %s",
+            (team, start)
+        )
 
 def load_from_db():
     GROUP_TEAMS.clear()
@@ -418,15 +535,22 @@ async def require_owner(update: Update) -> bool:
         return False
     return True
 
+def is_registered_admin(chat_id: int, user_id: int, min_level: int = 1) -> bool:
+    return int(CHAT_ADMINS.get(chat_id, {}).get(user_id, 0)) >= min_level
+
+async def require_registered_admin(update: Update, min_level: int = 1) -> bool:
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    if not is_registered_admin(chat_id, user_id, min_level=min_level):
+        await update.message.reply_text("⛔ You don’t have permission to use this command.")
+        return False
+    return True
+
 async def require_team(update: Update):
     team = get_team(update.effective_chat.id)
     if team is None:
         await update.message.reply_text(
-            "Not a team group yet.\n\n"
-            "Owner can register this group using:\n"
-            "/registerteam Team 1\n\n"
-            "To see the group ID:\n"
-            "/chatid"
+            "Not a team group yet.\n\nOwner can register this group using:\n/registerteam Team 1\n\nTo see the group ID:\n/chatid"
         )
         return None
     return team
@@ -437,11 +561,15 @@ def log_exc(prefix: str, e: Exception):
     traceback.print_exc()
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    # catches handler crashes (so you see them in Railway logs)
     e = context.error
     print("❌ HANDLER ERROR:", repr(e))
     traceback.print_exc()
 
 async def safe_send(bot, *, chat_id: int, thread_id: int | None, text: str, parse_mode: str | None = None):
+    """
+    Sends message and logs Flood control / too-long / bad requests.
+    """
     try:
         await bot.send_message(
             chat_id=chat_id,
@@ -452,6 +580,7 @@ async def safe_send(bot, *, chat_id: int, thread_id: int | None, text: str, pars
     except RetryAfter as e:
         log_exc("⏳ RetryAfter (flood control)", e)
     except BadRequest as e:
+        # often: "Message is too long" or markdown issues
         log_exc("⚠️ BadRequest", e)
     except (TimedOut, NetworkError) as e:
         log_exc("🌐 Network/TimedOut", e)
@@ -482,12 +611,100 @@ async def registerteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"✅ Registered this group!\nTeam: {team_name}\nChat ID: {chat_id_}\nNext: /registeradmin 1"
     )
 
+async def unregisterteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type == "private":
+        return await update.message.reply_text("Run this command inside the team group (not in private).")
+    if not await require_owner(update):
+        return
+
+    chat_id_ = update.effective_chat.id
+    if chat_id_ not in GROUP_TEAMS:
+        return await update.message.reply_text("This group is not registered.")
+
+    team = GROUP_TEAMS.pop(chat_id_, None)
+    if chat_id_ in CHAT_ADMINS:
+        del CHAT_ADMINS[chat_id_]
+
+    db_delete_team(chat_id_)
+    await update.message.reply_text(f"🗑️ Team unregistered.\nRemoved team: {team}\nChat ID: {chat_id_}")
+
+async def registeradmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type == "private":
+        return await update.message.reply_text("Run this command inside the team group (not in private).")
+    if not await require_owner(update):
+        return
+
+    if not context.args:
+        return await update.message.reply_text("Format: /registeradmin 1\nTip: reply to a user then run /registeradmin 1")
+
+    try:
+        level = int(context.args[0])
+    except ValueError:
+        return await update.message.reply_text("Level must be a number. Example: /registeradmin 1")
+
+    chat_id_ = update.effective_chat.id
+    if update.message.reply_to_message and update.message.reply_to_message.from_user:
+        target_user = update.message.reply_to_message.from_user
+    else:
+        target_user = update.effective_user
+
+    CHAT_ADMINS[chat_id_][target_user.id] = level
+    db_upsert_admin(chat_id_, target_user.id, level)
+
+    name = clean(target_user.username or target_user.first_name or str(target_user.id))
+    await update.message.reply_text(f"✅ Registered bot-admin: {name} (level {level})")
+
+async def unregisteradmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type == "private":
+        return await update.message.reply_text("Run this command inside the team group (not in private).")
+    if not await require_owner(update):
+        return
+
+    chat_id_ = update.effective_chat.id
+    target_id = None
+    target_label = None
+
+    if update.message.reply_to_message and update.message.reply_to_message.from_user:
+        u = update.message.reply_to_message.from_user
+        target_id = u.id
+        target_label = clean(u.username or u.first_name or str(u.id))
+    elif context.args:
+        try:
+            target_id = int(context.args[0])
+            target_label = str(target_id)
+        except ValueError:
+            return await update.message.reply_text("Use: reply then /unregisteradmin\nor: /unregisteradmin <user_id>")
+    else:
+        return await update.message.reply_text("Use: reply then /unregisteradmin\nor: /unregisteradmin <user_id>")
+
+    if target_id not in CHAT_ADMINS.get(chat_id_, {}):
+        return await update.message.reply_text("That user is not a bot-admin in this group.")
+
+    del CHAT_ADMINS[chat_id_][target_id]
+    db_delete_admin(chat_id_, target_id)
+    await update.message.reply_text(f"🗑️ Removed bot-admin access for: {target_label}")
+
+async def listadmins(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type == "private":
+        return await update.message.reply_text("Run this command inside the team group (not in private).")
+    if not await require_owner(update):
+        return
+
+    chat_id_ = update.effective_chat.id
+    admins = CHAT_ADMINS.get(chat_id_, {})
+    if not admins:
+        return await update.message.reply_text("No bot-admins registered in this group.")
+
+    lines = []
+    for uid, lvl in sorted(admins.items(), key=lambda x: (-int(x[1]), int(x[0]))):
+        lines.append(f"• User ID: {uid} — level {int(lvl)}")
+    await update.message.reply_text("👑 Bot Admins (this group):\n\n" + "\n".join(lines))
+
 async def registergoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == "private":
         return await update.message.reply_text("Run this command inside the target GC (not in private).")
     if not await require_owner(update):
         return
-
     if not context.args:
         return await update.message.reply_text(
             "Format: /registergoal 1\n"
@@ -508,7 +725,7 @@ async def registergoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     where = "General" if not thread_id else f"Topic (thread_id={thread_id})"
     await update.message.reply_text(
-        "✅ Registered this destination for scheduled GOALBOARD reports.\n"
+        f"✅ Registered this destination for scheduled GOALBOARD reports.\n"
         f"Team: {team}\n"
         f"Posts to: {where}\n\n"
         "Schedule: 8AM, 10AM, 12PM, 2PM, 4PM, 6PM, 8PM, 10PM (PH)"
@@ -562,7 +779,8 @@ async def handle_sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ts_iso = now_ph().isoformat()
 
     for raw in update.message.text.splitlines():
-        line = raw.strip().lstrip("*•- ").strip()
+        line = raw.strip()
+        line = line.lstrip("*•- ").strip()
         if not line.startswith("+"):
             continue
 
@@ -582,7 +800,7 @@ async def handle_sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
             continue
 
         db_add_sale(team, canonical_page, float(amount), ts_iso)
-        db_add_team_page(team, canonical_page)
+        db_add_team_page(team, canonical_page)  # ✅ auto-available
         saved = True
 
     if saved:
@@ -601,7 +819,6 @@ async def pages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     team = await require_team(update)
     if team is None:
         return
-
     lines = [f"{tag} → {ALLOWED_PAGES[tag]}" for tag in sorted(ALLOWED_PAGES.keys())]
     await update.message.reply_text(f"📘 Approved Pages (use tags) — {team}\n\n" + "\n".join(lines))
 
@@ -619,7 +836,7 @@ async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
             GROUP BY page
             ORDER BY total DESC
             """,
-            (team,),
+            (team,)
         )
         rows = cur.fetchall()
 
@@ -629,7 +846,6 @@ async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = f"🏆 SALES LEADERBOARD (LIFETIME by Page) — {team}\n\n"
     for i, (page, total) in enumerate(rows, 1):
         msg += f"{i}. {page} — ${float(total):.2f}\n"
-
     await update.message.reply_text(msg)
 
 async def setgoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -641,13 +857,11 @@ async def setgoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     entries = [e.strip() for e in raw.replace("\n", ",").split(",") if e.strip()]
 
     results, errors = [], []
-
     for entry in entries:
         parts = entry.split()
         if len(parts) < 2:
             errors.append(entry)
             continue
-
         try:
             goal = float(parts[-1])
         except ValueError:
@@ -662,14 +876,12 @@ async def setgoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         shift_goals[page] = goal
         db_upsert_shift_goal(page, goal)
-        db_add_team_page(team, page)  # ensure visible for this team
-
+        db_add_team_page(team, page)  # ✅ ensure visible for this team
         results.append(f"✓ {page} = ${goal:.2f}")
 
     msg = "🎯 Shift Goals Updated:\n" + ("\n".join(results) if results else "(no valid entries)")
     if errors:
         msg += "\n\n⚠️ Invalid:\n" + "\n".join(errors)
-
     await update.message.reply_text(msg)
 
 async def goalboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -689,7 +901,7 @@ async def goalboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
             WHERE team=%s AND ts >= %s
             GROUP BY page
             """,
-            (team, start),
+            (team, start)
         )
         rows = cur.fetchall()
 
@@ -703,22 +915,14 @@ async def goalboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not totals:
         return await update.message.reply_text(
-            f"🎯 GOAL PROGRESS — {team}\n"
-            f"🕒 Shift: {label}\n"
-            f"✅ Shift started: {start.strftime('%b %d, %Y %I:%M %p')} (PH)\n\n"
-            "No sales yet for this shift."
+            f"🎯 GOAL PROGRESS — {team}\n🕒 Shift: {label}\n✅ Shift started: {start.strftime('%b %d, %Y %I:%M %p')} (PH)\n\nNo sales yet for this shift."
         )
 
-    msg = (
-        f"🎯 GOAL PROGRESS — {team}\n"
-        f"🕒 Shift: {label}\n"
-        f"✅ Shift started: {start.strftime('%b %d, %Y %I:%M %p')} (PH)\n\n"
-    )
-
+    msg = f"🎯 GOAL PROGRESS — {team}\n🕒 Shift: {label}\n✅ Shift started: {start.strftime('%b %d, %Y %I:%M %p')} (PH)\n\n"
     for page, amt in sorted(totals.items(), key=lambda x: x[1], reverse=True):
-        goal = float(shift_goals.get(page, 0))
+        goal = shift_goals.get(page, 0)
         if goal:
-            pct = (amt / goal) * 100.0
+            pct = (amt / goal) * 100
             msg += f"{get_color(pct)} {page}: ${amt:.2f} / ${goal:.2f} ({pct:.1f}%)\n"
         else:
             msg += f"⚪ {page}: ${amt:.2f} (no shift goal)\n"
@@ -742,7 +946,7 @@ async def redpages(update: Update, context: ContextTypes.DEFAULT_TYPE):
             WHERE team=%s AND ts >= %s
             GROUP BY page
             """,
-            (team, start),
+            (team, start)
         )
         rows = cur.fetchall()
 
@@ -754,30 +958,19 @@ async def redpages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if float(val) != 0:
             totals[page] = float(val)
 
-    msg = (
-        f"🚨 RED PAGES — {team}\n"
-        f"🕒 Shift: {label}\n"
-        f"✅ Shift started: {start.strftime('%b %d, %Y %I:%M %p')} (PH)\n\n"
-    )
-
+    msg = f"🚨 RED PAGES — {team}\n🕒 Shift: {label}\n✅ Shift started: {start.strftime('%b %d, %Y %I:%M %p')} (PH)\n\n"
     any_found = False
-
-    # Only check pages that exist for this team (auto team_pages)
-    team_pages = set(db_get_team_pages(team))
-    pages_to_check = sorted(team_pages) if team_pages else sorted(totals.keys())
-
-    for page in pages_to_check:
-        amt = float(totals.get(page, 0.0))
-        goal = float(shift_goals.get(page, 0.0))
+    for page, amt in sorted(totals.items()):
+        goal = shift_goals.get(page, 0)
         if goal <= 0:
             continue
-
-        pct = (amt / goal) * 100.0
+        pct = (amt / goal) * 100
         if pct < 31:
             any_found = True
             msg += f"🔴 {page}: ${amt:.2f} / ${goal:.2f} ({pct:.1f}%)\n"
 
-   
+# ... continuing from where your file cut off ...
+
     if not any_found:
         return await update.message.reply_text("✅ No red pages right now (this shift).")
     await update.message.reply_text(msg)
@@ -1318,6 +1511,8 @@ def main():
     # owner-only
     app.add_handler(CommandHandler("registerteam", registerteam))
     app.add_handler(CommandHandler("unregisterteam", unregisterteam))
+    app.add_handler(CommandHandler("registeradmin", registeradmin))
+    app.add_handler(CommandHandler("unregisteradmin", unregisteradmin))
     app.add_handler(CommandHandler("listadmins", listadmins))
     app.add_handler(CommandHandler("registergoal", registergoal))
     app.add_handler(CommandHandler("registergoalall", registergoalall))
@@ -1359,4 +1554,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
