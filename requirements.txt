@@ -1,9 +1,2 @@
 python-telegram-bot==20.7
-fastapi
-uvicorn
-psycopg2-binary
-python-multipart
-passlib[bcrypt]
-pyotp
-python-jose
 
