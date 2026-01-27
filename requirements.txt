@@ -1,5 +1,7 @@
-python-telegram-bot[job-queue]==20.7
-fastapi==0.115.0
-uvicorn==0.30.6
+fastapi
+uvicorn
 psycopg2-binary
-
+python-multipart
+passlib[bcrypt]
+pyotp
+python-jose
