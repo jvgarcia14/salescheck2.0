@@ -26,58 +26,7 @@
 #   ✅ NO MORE SILENT FAILURES
 #     - logs RetryAfter (flood control), message-too-long, etc. in Railway logs
 # ==========================================
-import pyotp
-from passlib.context import CryptContext
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
-def hash_pin(pin: str):
-    return pwd_context.hash(pin)
-
-def verify_pin(pin, hashed):
-    return pwd_context.verify(pin, hashed)
-
-class RegisterReq(BaseModel):
-    invite_code: str
-    pin: str
-    team: str
-
-class VerifyOTPReq(BaseModel):
-    invite_code: str
-    otp: str
-
-@app.post("/auth/register")
-def register(req: RegisterReq):
-    secret = pyotp.random_base32()
-    pin_hash = hash_pin(req.pin)
-
-    cur.execute(
-        "INSERT INTO app_users (invite_code, pin_hash, totp_secret, team) VALUES (%s,%s,%s,%s)",
-        (req.invite_code, pin_hash, secret, req.team)
-    )
-
-    otp_uri = pyotp.totp.TOTP(secret).provisioning_uri(
-        name=req.invite_code,
-        issuer_name="Sales Dashboard"
-    )
-
-    return {"qr": otp_uri}
-
-@app.post("/auth/verify")
-def verify(req: VerifyOTPReq):
-    cur.execute("SELECT totp_secret FROM app_users WHERE invite_code=%s", (req.invite_code,))
-    row = cur.fetchone()
-
-    if not row:
-        raise HTTPException(400, "Invalid invite")
-
-    totp = pyotp.TOTP(row[0])
-    if not totp.verify(req.otp):
-        raise HTTPException(401, "Invalid OTP")
-
-    return {"status": "ok"}
 
 import os
 import traceback
@@ -1611,6 +1560,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
