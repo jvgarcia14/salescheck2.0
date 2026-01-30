@@ -191,8 +191,8 @@ ALLOWED_PAGES = {
 
     "#skypaidfree": "Sky Paid / Free",
     
-    "#utahJazpaid": "UtahJaz Paid",
-    "#utahJazfree": "UtahJaz Free",
+    "#utahjazpaid": "Utahjaz Paid",
+    "#utahjazfree": "Utahjaz Free",
     
 }
 
@@ -1566,6 +1566,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
