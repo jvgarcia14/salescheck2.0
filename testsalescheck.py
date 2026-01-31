@@ -98,6 +98,9 @@ ALLOWED_PAGES = {
     "#bronwinpaid": "Bronwin Paid",
     "#bronwinwelcome": "Bronwin Welcome",
 
+    "#camipaid": "Cami Paid",
+    "#camifree": "Cami Free",
+
     "#carterpaidfree": "Carter Paid / Free",
 
     "#christipaidfree": "Christi Paid and Free",
@@ -112,6 +115,8 @@ ALLOWED_PAGES = {
     "#dandfreeoftv": "Dan D Free / OFTV",
     "#dandpaid": "Dan D Paid",
     "#dandwelcome": "Dan D Welcome",
+
+    "#ella": "Ella",
 
     "#emilyraypaidfree": "Emily Ray Paid / Free",
 
@@ -155,7 +160,14 @@ ALLOWED_PAGES = {
     "#lilahfree": "Lilah Free",
     "#lilahpaid": "Lilah Paid",
 
+    "#lily": "Lily",
+    
+    "#lucy": "Lucy",
+
     "#livv": "Livv",
+
+    "#madelynpaid": "Madelyn Paid",
+    "#madelynfree": "Madelyn Free",
 
     "#madison": "Madison",
 
@@ -1566,6 +1578,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
