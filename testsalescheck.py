@@ -1,4 +1,3 @@
-
 # ==========================================
 #   ULTIMATE SALES + GOAL BOT (RAILWAY) - DB VERSION + AUTO GOALBOARD REPORTS (TOPIC SUPPORT)
 #   - Saves sales/goals/admins/teams/overrides to Postgres
@@ -25,14 +24,18 @@
 #
 #   ✅ NO MORE SILENT FAILURES
 #     - logs RetryAfter (flood control), message-too-long, etc. in Railway logs
+#
+#   ✅ NEW (EDIT REAL SALES)
+#     - /sales [page/tag] [limit]  -> show recent sales rows with IDs
+#     - /edit <page/tag> <amount>  -> edits MOST RECENT sale row for that page (DB UPDATE)
 # ==========================================
-
 
 import os
 import traceback
 from collections import defaultdict
 from datetime import datetime, timedelta, time
 from zoneinfo import ZoneInfo
+from decimal import Decimal
 
 import psycopg2
 from telegram import Update
@@ -126,7 +129,7 @@ ALLOWED_PAGES = {
     "#fanslyteam2": "Fansly Team2",
     "#fanslyteam3": "Fansly Team3",
 
-    "#francescapaid":"Francesca Paid",
+    "#francescapaid": "Francesca Paid",
 
     "#gracefree": "Grace Free",
 
@@ -161,7 +164,7 @@ ALLOWED_PAGES = {
     "#lilahpaid": "Lilah Paid",
 
     "#lily": "Lily",
-    
+
     "#lucy": "Lucy",
 
     "#livv": "Livv",
@@ -202,10 +205,9 @@ ALLOWED_PAGES = {
     "#sarahc": "Sarah C",
 
     "#skypaidfree": "Sky Paid / Free",
-    
+
     "#utahjazpaid": "Utahjaz Paid",
     "#utahjazfree": "Utahjaz Free",
-    
 }
 
 # ----------------- IN-MEM CACHE (loaded from DB) -----------------
@@ -285,6 +287,16 @@ def get_color(p):
     if p >= 31: return "🟡"
     if p >= 11: return "🟠"
     return "🔴"
+
+def parse_amount(value: str) -> float:
+    # accepts: 1000, +1000, 1,000
+    s = (value or "").strip().replace(",", "")
+    if s.startswith("+"):
+        s = s[1:].strip()
+    d = Decimal(s)
+    if d < 0:
+        raise ValueError("amount must be >= 0")
+    return float(d)
 
 # ----------------- DB SCHEMA + HELPERS -----------------
 def init_db():
@@ -368,7 +380,6 @@ def db_register_team(chat_id: int, team_name: str):
 
 def db_delete_team(chat_id: int):
     with db.cursor() as cur:
-        # remove team + admins; keep sales/history by default
         cur.execute("DELETE FROM teams WHERE chat_id=%s", (chat_id,))
         cur.execute("DELETE FROM admins WHERE chat_id=%s", (chat_id,))
 
@@ -521,6 +532,62 @@ def db_reset_daily_sales(team: str):
             (team, start)
         )
 
+# ✅ NEW: recent sales rows (for /sales)
+def db_get_recent_sales(team: str, page: str | None, limit: int = 20):
+    with db.cursor() as cur:
+        if page:
+            cur.execute(
+                """
+                SELECT id, page, amount, ts
+                FROM sales
+                WHERE team=%s AND page=%s
+                ORDER BY ts DESC
+                LIMIT %s
+                """,
+                (team, page, limit)
+            )
+        else:
+            cur.execute(
+                """
+                SELECT id, page, amount, ts
+                FROM sales
+                WHERE team=%s
+                ORDER BY ts DESC
+                LIMIT %s
+                """,
+                (team, limit)
+            )
+        return cur.fetchall()
+
+# ✅ NEW: find + update last sale (for /edit)
+def db_find_last_sale(team: str, page: str, within_days: int = 7):
+    cutoff = datetime.now(tz=PH_TZ) - timedelta(days=within_days)
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, amount, ts
+            FROM sales
+            WHERE team=%s AND page=%s AND ts >= %s
+            ORDER BY ts DESC
+            LIMIT 1
+            """,
+            (team, page, cutoff)
+        )
+        return cur.fetchone()
+
+def db_update_sale_amount(sale_id: int, new_amount: float):
+    with db.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE sales
+            SET amount=%s
+            WHERE id=%s
+            RETURNING id, team, page, amount, ts
+            """,
+            (new_amount, sale_id)
+        )
+        return cur.fetchone()
+
 def load_from_db():
     GROUP_TEAMS.clear()
     CHAT_ADMINS.clear()
@@ -585,7 +652,6 @@ def log_exc(prefix: str, e: Exception):
     traceback.print_exc()
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    # catches handler crashes (so you see them in Railway logs)
     e = context.error
     print("❌ HANDLER ERROR:", repr(e))
     traceback.print_exc()
@@ -604,7 +670,6 @@ async def safe_send(bot, *, chat_id: int, thread_id: int | None, text: str, pars
     except RetryAfter as e:
         log_exc("⏳ RetryAfter (flood control)", e)
     except BadRequest as e:
-        # often: "Message is too long" or markdown issues
         log_exc("⚠️ BadRequest", e)
     except (TimedOut, NetworkError) as e:
         log_exc("🌐 Network/TimedOut", e)
@@ -838,6 +903,127 @@ async def handle_sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{bad}\n\nUse ONLY these approved tags:\n{allowed}"
         )
 
+# =========================
+# ✅ NEW: /sales (show recent sales with IDs)
+# =========================
+async def sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    team = await require_team(update)
+    if team is None:
+        return
+    if not await require_registered_admin(update, 1):
+        return
+
+    # Usage:
+    # /sales
+    # /sales #dandpaid
+    # /sales #dandpaid 50
+    args = context.args or []
+    limit = 20
+    page = None
+
+    if args and args[-1].isdigit():
+        limit = max(1, min(200, int(args[-1])))
+        page_str = " ".join(args[:-1]).strip()
+    else:
+        page_str = " ".join(args).strip()
+
+    if page_str:
+        page = canonicalize_page_name(page_str)
+        if page is None:
+            return await update.message.reply_text("Invalid page/tag. Try: /sales #dandpaid 20")
+
+    rows = db_get_recent_sales(team, page, limit=limit)
+    if not rows:
+        return await update.message.reply_text("No sales found yet.")
+
+    title = f"🧾 RECENT SALES — {team}"
+    if page:
+        title += f"\n📌 Page: {page}"
+    lines = [title, ""]
+
+    for sid, pg, amt, ts in rows:
+        ts_ph = ts.astimezone(PH_TZ)
+        lines.append(f"ID {sid} | {pg} | +${float(amt):.2f} | {ts_ph.strftime('%b %d %I:%M %p')}")
+
+    msg = "\n".join(lines)
+    if len(msg) > TG_MAX:
+        msg = msg[:TG_MAX - 10] + "\n…(cut)"
+    await update.message.reply_text(msg)
+
+# =========================
+# ✅ NEW: /edit (EDIT REAL DB SALES ROW)
+# =========================
+async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Fix wrong sales input saved in DB by updating the latest sale row.
+
+    Examples:
+      /edit #dandpaid 1000
+      /edit Dan D Paid 1000
+      /edit #dandpaid +1,000
+
+    Behavior:
+      - Updates the MOST RECENT sale for (team + page) in last 7 days.
+      - Goalboard/leaderboard/quota will reflect immediately because they query sales table.
+    """
+    team = await require_team(update)
+    if team is None:
+        return
+    if not await require_registered_admin(update, 1):
+        return
+
+    raw = update.message.text.replace("/edit", "", 1).strip()
+    if not raw:
+        return await update.message.reply_text(
+            "Format:\n"
+            "/edit <page/tag> <new_amount>\n\n"
+            "Examples:\n"
+            "/edit #dandpaid 1000\n"
+            "/edit Dan D Paid 1000\n\n"
+            "Tip: use /sales #dandpaid to see IDs."
+        )
+
+    parts = raw.split()
+    if len(parts) < 2:
+        return await update.message.reply_text("Format: /edit <page/tag> <new_amount>")
+
+    amount_str = parts[-1]
+    page_str = " ".join(parts[:-1]).strip()
+
+    page = canonicalize_page_name(page_str)
+    if page is None:
+        return await update.message.reply_text("Invalid page/tag. Use a valid hashtag tag (recommended) or page name.")
+
+    try:
+        new_amount = parse_amount(amount_str)
+    except Exception:
+        return await update.message.reply_text("Amount must be a number. Example: /edit #dandpaid 1000")
+
+    last = db_find_last_sale(team, page, within_days=7)
+    if not last:
+        return await update.message.reply_text(
+            f"❌ No recent sale found for:\nTeam: {team}\nPage: {page}\n\nTry: /sales {page_str}"
+        )
+
+    sale_id, old_amount, old_ts = last
+    updated = db_update_sale_amount(int(sale_id), float(new_amount))
+    if not updated:
+        return await update.message.reply_text("❌ Failed to update sale (not found).")
+
+    _, up_team, up_page, up_amt, up_ts = updated
+    up_ts_ph = up_ts.astimezone(PH_TZ)
+
+    await update.message.reply_text(
+        "✅ Sale corrected in DB!\n\n"
+        f"Team: {up_team}\n"
+        f"Page: {up_page}\n"
+        f"Sale ID: {sale_id}\n"
+        f"Old: +${float(old_amount):.2f}\n"
+        f"New: +${float(up_amt):.2f}\n"
+        f"Time: {up_ts_ph.strftime('%b %d, %Y %I:%M %p')} (PH)\n\n"
+        "Goalboard/leaderboard will now reflect the fix."
+    )
+
 # ----------------- DISPLAY COMMANDS -----------------
 async def pages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     team = await require_team(update)
@@ -900,7 +1086,7 @@ async def setgoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         shift_goals[page] = goal
         db_upsert_shift_goal(page, goal)
-        db_add_team_page(team, page)  # ✅ ensure visible for this team
+        db_add_team_page(team, page)
         results.append(f"✓ {page} = ${goal:.2f}")
 
     msg = "🎯 Shift Goals Updated:\n" + ("\n".join(results) if results else "(no valid entries)")
@@ -993,8 +1179,6 @@ async def redpages(update: Update, context: ContextTypes.DEFAULT_TYPE):
             any_found = True
             msg += f"🔴 {page}: ${amt:.2f} / ${goal:.2f} ({pct:.1f}%)\n"
 
-# ... continuing from where your file cut off ...
-
     if not any_found:
         return await update.message.reply_text("✅ No red pages right now (this shift).")
     await update.message.reply_text(msg)
@@ -1030,7 +1214,7 @@ async def pagegoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         page_goals[page] = goal
         db_upsert_page_goal(page, goal)
-        db_add_team_page(team, page)  # ✅ ensure it shows for this team
+        db_add_team_page(team, page)
         results.append(f"✓ {page} = ${goal:.2f}")
 
     msg = "📊 Page Goals Updated (15/30 days):\n" + ("\n".join(results) if results else "(no valid entries)")
@@ -1116,7 +1300,6 @@ async def quota_period(update: Update, context: ContextTypes.DEFAULT_TYPE, days:
     for page, total in rows:
         totals[str(page)] = float(total)
 
-    # apply overrides (page totals)
     for page, val in manual_page_totals.items():
         if float(val) != 0:
             totals[page] = float(val)
@@ -1168,11 +1351,9 @@ async def editgoalboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         return await update.message.reply_text("Amount must be a number.")
 
-    # override BOTH shift + period totals
     manual_shift_totals[page] = amount
     manual_page_totals[page] = amount
     db_upsert_override(page, shift_total=amount, page_total=amount)
-
     db_add_team_page(team, page)
 
     await update.message.reply_text(
@@ -1205,7 +1386,6 @@ async def editpagegoals(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     manual_page_totals[page] = amount
     db_upsert_override(page, page_total=amount)
-
     db_add_team_page(team, page)
 
     await update.message.reply_text(f"✅ Updated quotas\n{page} = ${amount:.2f} (15/30 days)")
@@ -1267,16 +1447,13 @@ def db_list_team_details():
 
 def db_delete_team_by_name(team_name: str):
     with db.cursor() as cur:
-        # delete registrations + report destinations + available pages for that team
         cur.execute("DELETE FROM teams WHERE name=%s", (team_name,))
         cur.execute("DELETE FROM report_groups WHERE team=%s", (team_name,))
         cur.execute("DELETE FROM team_pages WHERE team=%s", (team_name,))
-        # NOTE: sales history stays (by design). If you want to delete sales too:
-        # cur.execute("DELETE FROM sales WHERE team=%s", (team_name,))
+        # sales history stays by design
 
 async def listteams(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == "private":
-        # allow in private too for owner
         pass
     if not await require_owner(update):
         return
@@ -1301,25 +1478,19 @@ async def deleteteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("Format: /deleteteam 1  OR  /deleteteam Team 1")
 
     arg = clean(" ".join(context.args)).strip()
-
-    teams = db_list_team_details()  # list of (name, count)
+    teams = db_list_team_details()
     if not teams:
         return await update.message.reply_text("No teams registered yet.")
 
-    # allow numeric index
     target = None
     if arg.isdigit():
         idx = int(arg)
         if 1 <= idx <= len(teams):
             target = teams[idx - 1][0]
     else:
-        # normalize "1" -> "Team 1" or direct match
         if arg.lower().startswith("team "):
             target = arg
-        elif arg.isdigit():
-            target = f"Team {arg}"
         else:
-            # try exact match
             for name, _ in teams:
                 if name.lower() == arg.lower():
                     target = name
@@ -1329,10 +1500,7 @@ async def deleteteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("Team not found. Use /listteams to see the list.")
 
     db_delete_team_by_name(target)
-
-    # refresh memory cache (so bot stops seeing old team mapping)
     load_from_db()
-
     await update.message.reply_text(f"🗑️ Deleted team registration: {target}\n(History sales are kept.)")
 
 # ----------------- SCHEDULED GOALBOARD (TABLE) -----------------
@@ -1356,15 +1524,13 @@ def _build_goalboard_table_lines(team: str, start: datetime):
     for page, total in rows:
         totals[str(page)] = float(total)
 
-    # apply shift overrides (non-zero)
     for page, val in manual_shift_totals.items():
         if float(val) != 0:
             totals[page] = float(val)
 
-    # ✅ ONLY show pages that exist for this team
     team_pages = set(db_get_team_pages(team))
-    team_pages |= set(totals.keys())          # safety
-    team_pages |= set(shift_goals.keys())     # show goals even before sales
+    team_pages |= set(totals.keys())
+    team_pages |= set(shift_goals.keys())
 
     all_pages = sorted(team_pages)
 
@@ -1419,10 +1585,6 @@ def _build_goalboard_table_lines(team: str, start: datetime):
     return header_text, [col_header, sep] + table_rows
 
 def _chunk_team_table_messages(team: str, header_text: str, lines: list[str]) -> list[str]:
-    """
-    Builds 1 message per team, but if too big -> Part 1/2, Part 2/2 etc (still per team).
-    Splits by TELEGRAM 4096 chars safely.
-    """
     if len(lines) <= 2:
         return [header_text + "\nNo pages found for this team yet."]
 
@@ -1433,20 +1595,16 @@ def _chunk_team_table_messages(team: str, header_text: str, lines: list[str]) ->
         body = "\n".join(table_head + rows)
         return prefix + "\n" + "```\n" + body + "\n```"
 
-    # try single message first
-    one_prefix = header_text
-    one_msg = build_msg(one_prefix, data_rows)
+    one_msg = build_msg(header_text, data_rows)
     if len(one_msg) <= TG_MAX:
         return [one_msg]
 
-    # otherwise split by char length
     parts: list[list[str]] = []
     current: list[str] = []
-    current_len = len(build_msg(f"🎯 GOALBOARD — {team} (Part 1/1)\n", []))  # base overhead estimate
+    current_len = len(build_msg(f"🎯 GOALBOARD — {team} (Part 1/1)\n", []))
 
     for r in data_rows:
-        # +1 for newline
-        if current and (current_len + len(r) + 1) > (TG_SAFE):
+        if current and (current_len + len(r) + 1) > TG_SAFE:
             parts.append(current)
             current = [r]
             current_len = len(build_msg(f"🎯 GOALBOARD — {team} (Part X/Y)\n", [])) + len(r) + 1
@@ -1462,8 +1620,6 @@ def _chunk_team_table_messages(team: str, header_text: str, lines: list[str]) ->
     for i, rows in enumerate(parts, 1):
         prefix = header_text if i == 1 else f"🎯 GOALBOARD — {team} (Part {i}/{total_parts})\n"
         msg = build_msg(prefix, rows)
-
-        # if markdown makes it longer than max (rare), fallback to plain
         if len(msg) > TG_MAX:
             plain = prefix + "\n" + "\n".join(table_head + rows)
             msgs.append(plain[:TG_MAX])
@@ -1478,7 +1634,6 @@ async def send_scheduled_goalboard(context: ContextTypes.DEFAULT_TYPE):
 
     global_dest = db_get_global_report_dest()
 
-    # -------- GLOBAL MODE (ALL TEAMS -> one topic) --------
     if global_dest:
         dest_chat_id, dest_thread_id = global_dest
         teams = db_list_all_teams()
@@ -1490,7 +1645,6 @@ async def send_scheduled_goalboard(context: ContextTypes.DEFAULT_TYPE):
             msgs = _chunk_team_table_messages(team, header_text, lines)
 
             for m in msgs:
-                # try markdown, if fails safe_send logs it; we also fallback to plain on BadRequest below
                 await safe_send(
                     context.application.bot,
                     chat_id=dest_chat_id,
@@ -1500,7 +1654,6 @@ async def send_scheduled_goalboard(context: ContextTypes.DEFAULT_TYPE):
                 )
         return
 
-    # -------- PER-TEAM MODE --------
     report_groups = db_get_report_groups()
     if not report_groups:
         return
@@ -1532,6 +1685,10 @@ def main():
     # basic
     app.add_handler(CommandHandler("chatid", chatid))
 
+    # ✅ NEW commands
+    app.add_handler(CommandHandler("sales", sales))
+    app.add_handler(CommandHandler("edit", edit))
+
     # owner-only
     app.add_handler(CommandHandler("registerteam", registerteam))
     app.add_handler(CommandHandler("unregisterteam", unregisterteam))
@@ -1541,8 +1698,8 @@ def main():
     app.add_handler(CommandHandler("registergoal", registergoal))
     app.add_handler(CommandHandler("registergoalall", registergoalall))
     app.add_handler(CommandHandler("resetdaily", resetdaily))
-    app.add_handler(CommandHandler("listteams", listteams))      # ✅ NEW
-    app.add_handler(CommandHandler("deleteteam", deleteteam))    # ✅ NEW
+    app.add_handler(CommandHandler("listteams", listteams))
+    app.add_handler(CommandHandler("deleteteam", deleteteam))
 
     # everyone
     app.add_handler(CommandHandler("pages", pages))
@@ -1578,11 +1735,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
