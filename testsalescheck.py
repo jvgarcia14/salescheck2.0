@@ -1,33 +1,9 @@
 # ==========================================
 #   ULTIMATE SALES + GOAL BOT (RAILWAY) - DB VERSION + AUTO GOALBOARD REPORTS (TOPIC SUPPORT)
-#   - Saves sales/goals/admins/teams/overrides to Postgres
-#   - Loads everything from DB on startup
-#
-#   ✅ /registergoal 1
-#     - per-team destination (run inside a topic to save message_thread_id)
-#
-#   ✅ /registergoalall
-#     - GLOBAL destination (run inside a topic)
-#     - bot auto-sends GOALBOARD for ALL TEAMS into that topic
-#     - One GOALBOARD message per team
-#     - If a team table is huge: that team becomes Part 1/2, Part 2/2 (still per team)
-#
-#   ✅ /resetdaily
-#     - deletes TODAY’s sales for the current team (00:00 PH -> now)
-#     - shift "reset" still works automatically (because goalboard filters by shift start)
-#
-#   ✅ NEW (AUTO TEAM PAGES)
-#     - Scheduled GOALBOARD will ONLY show pages that exist for that team.
-#     - A page becomes "available" for a team automatically when:
-#         • a sale is recorded for that page, OR
-#         • you set a goal for that page in that team
-#
-#   ✅ NO MORE SILENT FAILURES
-#     - logs RetryAfter (flood control), message-too-long, etc. in Railway logs
-#
-#   ✅ NEW (EDIT REAL SALES)
-#     - /sales [page/tag] [limit]  -> show recent sales rows with IDs
-#     - /edit <page/tag> <amount>  -> edits MOST RECENT sale row for that page (DB UPDATE)
+#   ✅ Only counts sales from CURRENT TEAM GC (chat_id)
+#   ✅ /sales [page/tag] [limit] -> shows recent sales from THIS GC
+#   ✅ /edit <page/tag> <amount> -> edits MOST RECENT sale from THIS GC (DB UPDATE)
+#   ✅ Safe DB migrations for older tables (id + chat_id)
 # ==========================================
 
 import os
@@ -64,9 +40,8 @@ if not BOT_TOKEN:
 db = psycopg2.connect(DATABASE_URL, sslmode="require")
 db.autocommit = True
 
-# Telegram hard limit is 4096 chars/message
 TG_MAX = 4096
-TG_SAFE = 3900  # leave room for headers/markdown
+TG_SAFE = 3900
 
 # ----------------- PAGES -----------------
 ALLOWED_PAGES = {
@@ -74,151 +49,102 @@ ALLOWED_PAGES = {
     "#alannapaid": "Alanna Paid",
     "#alannawelcome": "Alanna Welcome",
     "#alexalana": "Alexa lana",
-
     "#alexis": "Alexis",
-
     "#allyfree": "Ally Free",
     "#allypaid": "Ally Paid",
-
     "#aprilb": "April B",
     "#ashley": "Ashley",
-
     "#asiadollpaidfree": "Asia Doll Paid / Free",
-
     "#autumnfree": "Autumn Free",
     "#autumnpaid": "Autumn Paid",
     "#autumnwelcome": "Autumn Welcome",
-
     "#brifreeoftv": "Bri Free / OFTV",
     "#bripaid": "Bri Paid",
     "#briwelcome": "Bri Welcome",
-
     "#brittanyamain": "Brittanya Main",
     "#brittanyapaidfree": "Brittanya Paid / Free",
-
     "#bronwinfree": "Bronwin Free",
     "#bronwinoftvmcarteroftv": "Bronwin OFTV & MCarter OFTV",
     "#bronwinpaid": "Bronwin Paid",
     "#bronwinwelcome": "Bronwin Welcome",
-
     "#camipaid": "Cami Paid",
     "#camifree": "Cami Free",
-
     "#carterpaidfree": "Carter Paid / Free",
-
     "#christipaidfree": "Christi Paid and Free",
-
     "#claire": "Claire",
-
     "#cocofree": "Coco Free",
     "#cocopaid": "Coco Paid",
-
     "#cynthiafree": "Cynthia Free",
-
     "#dandfreeoftv": "Dan D Free / OFTV",
     "#dandpaid": "Dan D Paid",
     "#dandwelcome": "Dan D Welcome",
-
     "#ella": "Ella",
-
     "#emilyraypaidfree": "Emily Ray Paid / Free",
-
     "#essiepaidfree": "Essie Paid / Free",
-
     "#fanslyteam1": "Fansly Team1",
     "#fanslyteam2": "Fansly Team2",
     "#fanslyteam3": "Fansly Team3",
-
     "#francescapaid": "Francesca Paid",
-
     "#gracefree": "Grace Free",
-
     "#haileywfree": "Hailey W Free",
     "#haileywpaid": "Hailey W Paid",
-
     "#hazeyfree": "Hazey Free",
     "#hazeypaid": "Hazey Paid",
     "#hazeywelcome": "Hazey Welcome",
-
     "#honeynoppv": "Honey NO PPV",
     "#honeyvip": "Honey VIP",
-
     "#isabellaxizziekay": "Isabella x Izzie Kay",
-
     "#isa": "Isa Amador",
-
     "#islafree": "Isla Free",
     "#islaoftv": "Isla OFTV",
     "#islapaid": "Isla Paid",
     "#islawelcome": "Isla Welcome",
-
     "#juliavip": "Julia Vip",
-
     "#kayleexjasmyn": "Kaylee X Jasmyn",
-
     "#kissingcousinsxvalerievip": "Kissing Cousins X Valerie VIP",
-
     "#lexipaid": "Lexi Paid",
-
     "#lilahfree": "Lilah Free",
     "#lilahpaid": "Lilah Paid",
-
     "#lily": "Lily",
-
     "#lucy": "Lucy",
-
     "#livv": "Livv",
-
     "#madelynpaid": "Madelyn Paid",
     "#madelynfree": "Madelyn Free",
-
     "#madison": "Madison",
-
     "#mathildefree": "Mathilde Free",
     "#mathildepaid": "Mathilde Paid",
     "#mathildewelcome": "Mathilde Welcome",
     "#mathildepaidxisaxalexalana": "Mathilde Paid x Isa A x Alexa Lana",
-
     "#michellefree": "Michelle Free",
     "#michellevip": "Michelle VIP",
-
     "#mommycarter": "Mommy Carter",
-
     "#natalialfree": "Natalia L Free",
     "#natalialpaid": "Natalia L Paid",
     "#natalialnicolefansly": "Natalia L, Nicole Fansly",
-
     "#natalierfree": "Natalie R Free",
     "#natalierpaid": "Natalie R Paid",
-
     "#niapaid": "nia Paid",
-
     "#paris": "Paris",
-
     "#popstfree": "Pops T Free",
     "#popstpaid": "Pops T Paid",
-
     "#rubirosefree": "Rubi Rose Free",
     "#rubirosepaid": "Rubi Rose Paid",
-
     "#salah": "Salah",
     "#sarahc": "Sarah C",
-
     "#skypaidfree": "Sky Paid / Free",
-
     "#utahjazpaid": "Utahjaz Paid",
     "#utahjazfree": "Utahjaz Free",
 }
 
-# ----------------- IN-MEM CACHE (loaded from DB) -----------------
-GROUP_TEAMS = {}  # chat_id -> team name
-CHAT_ADMINS = defaultdict(dict)  # chat_id -> {user_id: level}
+# ----------------- IN-MEM CACHE -----------------
+GROUP_TEAMS = {}                    # chat_id -> team name
+CHAT_ADMINS = defaultdict(dict)     # chat_id -> {user_id: level}
 
-shift_goals = defaultdict(float)  # page -> goal (global per page in this DB schema)
-page_goals = defaultdict(float)   # page -> goal (global per page in this DB schema)
+shift_goals = defaultdict(float)    # page -> goal (global)
+page_goals = defaultdict(float)     # page -> goal (global)
 
-manual_shift_totals = defaultdict(float)  # page -> override amount
-manual_page_totals = defaultdict(float)   # page -> override amount
+manual_shift_totals = defaultdict(float)
+manual_page_totals = defaultdict(float)
 
 # ---------------- UTIL ----------------
 def clean(text: str):
@@ -314,8 +240,10 @@ def init_db():
             PRIMARY KEY (chat_id, user_id)
         );
 
+        -- ✅ IMPORTANT: sales table should have id + chat_id
         CREATE TABLE IF NOT EXISTS sales (
             id BIGSERIAL PRIMARY KEY,
+            chat_id BIGINT,
             team TEXT NOT NULL,
             page TEXT NOT NULL,
             amount NUMERIC NOT NULL,
@@ -338,21 +266,18 @@ def init_db():
             page_total  NUMERIC NOT NULL DEFAULT 0
         );
 
-        -- per-team destination
         CREATE TABLE IF NOT EXISTS report_groups (
             team TEXT PRIMARY KEY,
             chat_id BIGINT NOT NULL,
             thread_id BIGINT
         );
 
-        -- GLOBAL destination for ALL teams
         CREATE TABLE IF NOT EXISTS global_report_dest (
             id INT PRIMARY KEY DEFAULT 1,
             chat_id BIGINT NOT NULL,
             thread_id BIGINT
         );
 
-        -- per-team available pages (auto)
         CREATE TABLE IF NOT EXISTS team_pages (
             team TEXT NOT NULL,
             page TEXT NOT NULL,
@@ -360,10 +285,31 @@ def init_db():
         );
         """)
 
-        # safety migrations
+        # --- SAFETY MIGRATIONS ---
         cur.execute("""ALTER TABLE report_groups ADD COLUMN IF NOT EXISTS thread_id BIGINT;""")
         cur.execute("""ALTER TABLE global_report_dest ADD COLUMN IF NOT EXISTS thread_id BIGINT;""")
+
+        # ✅ If your old sales table existed without id/chat_id, add them:
+        cur.execute("ALTER TABLE sales ADD COLUMN IF NOT EXISTS id BIGSERIAL;")
+        cur.execute("ALTER TABLE sales ADD COLUMN IF NOT EXISTS chat_id BIGINT;")
+
+        # Ensure a primary key exists on sales (older table might have none)
+        cur.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conrelid = 'sales'::regclass AND contype = 'p'
+            ) THEN
+                ALTER TABLE sales ADD CONSTRAINT sales_pkey PRIMARY KEY (id);
+            END IF;
+        END$$;
+        """)
+
+        # Indexes for fast queries
         cur.execute("""CREATE INDEX IF NOT EXISTS idx_sales_team_ts ON sales (team, ts DESC);""")
+        cur.execute("""CREATE INDEX IF NOT EXISTS idx_sales_chat_ts ON sales (chat_id, ts DESC);""")
+        cur.execute("""CREATE INDEX IF NOT EXISTS idx_sales_chat_page_ts ON sales (chat_id, page, ts DESC);""")
         cur.execute("""CREATE INDEX IF NOT EXISTS idx_sales_team_page_ts ON sales (team, page, ts DESC);""")
 
 def db_register_team(chat_id: int, team_name: str):
@@ -399,11 +345,11 @@ def db_delete_admin(chat_id: int, user_id: int):
     with db.cursor() as cur:
         cur.execute("DELETE FROM admins WHERE chat_id=%s AND user_id=%s", (chat_id, user_id))
 
-def db_add_sale(team: str, page: str, amount: float, ts_iso: str):
+def db_add_sale(chat_id: int, team: str, page: str, amount: float, ts_iso: str):
     with db.cursor() as cur:
         cur.execute(
-            "INSERT INTO sales (team, page, amount, ts) VALUES (%s, %s, %s, %s)",
-            (team, page, amount, ts_iso)
+            "INSERT INTO sales (chat_id, team, page, amount, ts) VALUES (%s, %s, %s, %s, %s)",
+            (chat_id, team, page, amount, ts_iso)
         )
 
 def db_add_team_page(team: str, page: str):
@@ -524,54 +470,59 @@ def db_list_all_teams() -> list[str]:
         cur.execute("SELECT DISTINCT name FROM teams ORDER BY name ASC")
         return [str(r[0]) for r in cur.fetchall()]
 
-def db_reset_daily_sales(team: str):
+def db_team_chat_ids(team: str) -> list[int]:
+    """All registered group chat_ids for a given team."""
+    with db.cursor() as cur:
+        cur.execute("SELECT chat_id FROM teams WHERE name=%s", (team,))
+        return [int(r[0]) for r in cur.fetchall()]
+
+def db_reset_daily_sales(team: str, chat_id: int):
     start = day_start_ph(now_ph())
     with db.cursor() as cur:
         cur.execute(
-            "DELETE FROM sales WHERE team=%s AND ts >= %s",
-            (team, start)
+            "DELETE FROM sales WHERE team=%s AND chat_id=%s AND ts >= %s",
+            (team, chat_id, start)
         )
 
-# ✅ NEW: recent sales rows (for /sales)
-def db_get_recent_sales(team: str, page: str | None, limit: int = 20):
+# ✅ recent sales rows for THIS chat only
+def db_get_recent_sales(chat_id: int, team: str, page: str | None, limit: int = 20):
     with db.cursor() as cur:
         if page:
             cur.execute(
                 """
                 SELECT id, page, amount, ts
                 FROM sales
-                WHERE team=%s AND page=%s
+                WHERE chat_id=%s AND team=%s AND page=%s
                 ORDER BY ts DESC
                 LIMIT %s
                 """,
-                (team, page, limit)
+                (chat_id, team, page, limit)
             )
         else:
             cur.execute(
                 """
                 SELECT id, page, amount, ts
                 FROM sales
-                WHERE team=%s
+                WHERE chat_id=%s AND team=%s
                 ORDER BY ts DESC
                 LIMIT %s
                 """,
-                (team, limit)
+                (chat_id, team, limit)
             )
         return cur.fetchall()
 
-# ✅ NEW: find + update last sale (for /edit)
-def db_find_last_sale(team: str, page: str, within_days: int = 7):
+def db_find_last_sale(chat_id: int, team: str, page: str, within_days: int = 7):
     cutoff = datetime.now(tz=PH_TZ) - timedelta(days=within_days)
     with db.cursor() as cur:
         cur.execute(
             """
             SELECT id, amount, ts
             FROM sales
-            WHERE team=%s AND page=%s AND ts >= %s
+            WHERE chat_id=%s AND team=%s AND page=%s AND ts >= %s
             ORDER BY ts DESC
             LIMIT 1
             """,
-            (team, page, cutoff)
+            (chat_id, team, page, cutoff)
         )
         return cur.fetchone()
 
@@ -582,7 +533,7 @@ def db_update_sale_amount(sale_id: int, new_amount: float):
             UPDATE sales
             SET amount=%s
             WHERE id=%s
-            RETURNING id, team, page, amount, ts
+            RETURNING id, chat_id, team, page, amount, ts
             """,
             (new_amount, sale_id)
         )
@@ -657,9 +608,6 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     traceback.print_exc()
 
 async def safe_send(bot, *, chat_id: int, thread_id: int | None, text: str, parse_mode: str | None = None):
-    """
-    Sends message and logs Flood control / too-long / bad requests.
-    """
     try:
         await bot.send_message(
             chat_id=chat_id,
@@ -849,17 +797,19 @@ async def resetdaily(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_owner(update):
         return
 
-    db_reset_daily_sales(team)
+    chat_id_ = update.effective_chat.id
+    db_reset_daily_sales(team, chat_id_)
     await update.message.reply_text(
-        f"🧹 Daily reset complete for {team}.\nDeleted TODAY’s sales only (00:00 PH → now)."
+        f"🧹 Daily reset complete for {team} (THIS GC only).\nDeleted TODAY’s sales only (00:00 PH → now)."
     )
 
-# ----------------- SALES HANDLER -----------------
+# ----------------- SALES INPUT HANDLER -----------------
 async def handle_sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
 
-    team = get_team(update.effective_chat.id)
+    chat_id_ = update.effective_chat.id
+    team = get_team(chat_id_)
     if team is None:
         return
 
@@ -888,8 +838,8 @@ async def handle_sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
             unknown_tags.add(bad_token)
             continue
 
-        db_add_sale(team, canonical_page, float(amount), ts_iso)
-        db_add_team_page(team, canonical_page)  # ✅ auto-available
+        db_add_sale(chat_id_, team, canonical_page, float(amount), ts_iso)
+        db_add_team_page(team, canonical_page)
         saved = True
 
     if saved:
@@ -904,7 +854,7 @@ async def handle_sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 # =========================
-# ✅ NEW: /sales (show recent sales with IDs)
+# ✅ /sales (recent sales from THIS GC only)
 # =========================
 async def sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
     team = await require_team(update)
@@ -913,10 +863,8 @@ async def sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_registered_admin(update, 1):
         return
 
-    # Usage:
-    # /sales
-    # /sales #dandpaid
-    # /sales #dandpaid 50
+    chat_id_ = update.effective_chat.id
+
     args = context.args or []
     limit = 20
     page = None
@@ -932,11 +880,11 @@ async def sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if page is None:
             return await update.message.reply_text("Invalid page/tag. Try: /sales #dandpaid 20")
 
-    rows = db_get_recent_sales(team, page, limit=limit)
+    rows = db_get_recent_sales(chat_id_, team, page, limit=limit)
     if not rows:
-        return await update.message.reply_text("No sales found yet.")
+        return await update.message.reply_text("No sales found yet for THIS GC.")
 
-    title = f"🧾 RECENT SALES — {team}"
+    title = f"🧾 RECENT SALES — {team}\n📍 This GC only"
     if page:
         title += f"\n📌 Page: {page}"
     lines = [title, ""]
@@ -951,26 +899,16 @@ async def sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg)
 
 # =========================
-# ✅ NEW: /edit (EDIT REAL DB SALES ROW)
+# ✅ /edit (edits MOST RECENT sale from THIS GC only)
 # =========================
 async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Fix wrong sales input saved in DB by updating the latest sale row.
-
-    Examples:
-      /edit #dandpaid 1000
-      /edit Dan D Paid 1000
-      /edit #dandpaid +1,000
-
-    Behavior:
-      - Updates the MOST RECENT sale for (team + page) in last 7 days.
-      - Goalboard/leaderboard/quota will reflect immediately because they query sales table.
-    """
     team = await require_team(update)
     if team is None:
         return
     if not await require_registered_admin(update, 1):
         return
+
+    chat_id_ = update.effective_chat.id
 
     raw = update.message.text.replace("/edit", "", 1).strip()
     if not raw:
@@ -980,7 +918,7 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Examples:\n"
             "/edit #dandpaid 1000\n"
             "/edit Dan D Paid 1000\n\n"
-            "Tip: use /sales #dandpaid to see IDs."
+            "Tip: use /sales #dandpaid to see history."
         )
 
     parts = raw.split()
@@ -999,29 +937,30 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         return await update.message.reply_text("Amount must be a number. Example: /edit #dandpaid 1000")
 
-    last = db_find_last_sale(team, page, within_days=7)
+    last = db_find_last_sale(chat_id_, team, page, within_days=7)
     if not last:
         return await update.message.reply_text(
-            f"❌ No recent sale found for:\nTeam: {team}\nPage: {page}\n\nTry: /sales {page_str}"
+            f"❌ No recent sale found for THIS GC:\nTeam: {team}\nPage: {page}\n\nTry: /sales {page_str}"
         )
 
-    sale_id, old_amount, old_ts = last
+    sale_id, old_amount, _old_ts = last
     updated = db_update_sale_amount(int(sale_id), float(new_amount))
     if not updated:
         return await update.message.reply_text("❌ Failed to update sale (not found).")
 
-    _, up_team, up_page, up_amt, up_ts = updated
+    _, up_chat, up_team, up_page, up_amt, up_ts = updated
     up_ts_ph = up_ts.astimezone(PH_TZ)
 
     await update.message.reply_text(
         "✅ Sale corrected in DB!\n\n"
+        f"GC Chat ID: {up_chat}\n"
         f"Team: {up_team}\n"
         f"Page: {up_page}\n"
         f"Sale ID: {sale_id}\n"
         f"Old: +${float(old_amount):.2f}\n"
         f"New: +${float(up_amt):.2f}\n"
         f"Time: {up_ts_ph.strftime('%b %d, %Y %I:%M %p')} (PH)\n\n"
-        "Goalboard/leaderboard will now reflect the fix."
+        "Goalboard/leaderboard/quota for THIS GC will reflect the fix."
     )
 
 # ----------------- DISPLAY COMMANDS -----------------
@@ -1036,24 +975,25 @@ async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     team = await require_team(update)
     if team is None:
         return
+    chat_id_ = update.effective_chat.id
 
     with db.cursor() as cur:
         cur.execute(
             """
             SELECT page, SUM(amount) as total
             FROM sales
-            WHERE team=%s
+            WHERE team=%s AND chat_id=%s
             GROUP BY page
             ORDER BY total DESC
             """,
-            (team,)
+            (team, chat_id_)
         )
         rows = cur.fetchall()
 
     if not rows:
-        return await update.message.reply_text("No sales yet.")
+        return await update.message.reply_text("No sales yet for THIS GC.")
 
-    msg = f"🏆 SALES LEADERBOARD (LIFETIME by Page) — {team}\n\n"
+    msg = f"🏆 SALES LEADERBOARD (THIS GC) — {team}\n\n"
     for i, (page, total) in enumerate(rows, 1):
         msg += f"{i}. {page} — ${float(total):.2f}\n"
     await update.message.reply_text(msg)
@@ -1099,6 +1039,7 @@ async def goalboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if team is None:
         return
 
+    chat_id_ = update.effective_chat.id
     now = now_ph()
     start = shift_start(now)
     label = current_shift_label(now)
@@ -1108,10 +1049,10 @@ async def goalboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
             """
             SELECT page, SUM(amount) AS total
             FROM sales
-            WHERE team=%s AND ts >= %s
+            WHERE team=%s AND chat_id=%s AND ts >= %s
             GROUP BY page
             """,
-            (team, start)
+            (team, chat_id_, start)
         )
         rows = cur.fetchall()
 
@@ -1119,16 +1060,21 @@ async def goalboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for page, total in rows:
         totals[str(page)] += float(total)
 
+    # overrides (still global per page)
     for page, val in manual_shift_totals.items():
         if float(val) != 0:
             totals[page] = float(val)
 
     if not totals:
         return await update.message.reply_text(
-            f"🎯 GOAL PROGRESS — {team}\n🕒 Shift: {label}\n✅ Shift started: {start.strftime('%b %d, %Y %I:%M %p')} (PH)\n\nNo sales yet for this shift."
+            f"🎯 GOAL PROGRESS — {team}\n📍 This GC only\n🕒 Shift: {label}\n"
+            f"✅ Shift started: {start.strftime('%b %d, %Y %I:%M %p')} (PH)\n\nNo sales yet for this shift."
         )
 
-    msg = f"🎯 GOAL PROGRESS — {team}\n🕒 Shift: {label}\n✅ Shift started: {start.strftime('%b %d, %Y %I:%M %p')} (PH)\n\n"
+    msg = (
+        f"🎯 GOAL PROGRESS — {team}\n📍 This GC only\n🕒 Shift: {label}\n"
+        f"✅ Shift started: {start.strftime('%b %d, %Y %I:%M %p')} (PH)\n\n"
+    )
     for page, amt in sorted(totals.items(), key=lambda x: x[1], reverse=True):
         goal = shift_goals.get(page, 0)
         if goal:
@@ -1144,6 +1090,7 @@ async def redpages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if team is None:
         return
 
+    chat_id_ = update.effective_chat.id
     now = now_ph()
     start = shift_start(now)
     label = current_shift_label(now)
@@ -1153,10 +1100,10 @@ async def redpages(update: Update, context: ContextTypes.DEFAULT_TYPE):
             """
             SELECT page, SUM(amount) AS total
             FROM sales
-            WHERE team=%s AND ts >= %s
+            WHERE team=%s AND chat_id=%s AND ts >= %s
             GROUP BY page
             """,
-            (team, start)
+            (team, chat_id_, start)
         )
         rows = cur.fetchall()
 
@@ -1168,7 +1115,7 @@ async def redpages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if float(val) != 0:
             totals[page] = float(val)
 
-    msg = f"🚨 RED PAGES — {team}\n🕒 Shift: {label}\n✅ Shift started: {start.strftime('%b %d, %Y %I:%M %p')} (PH)\n\n"
+    msg = f"🚨 RED PAGES — {team}\n📍 This GC only\n🕒 Shift: {label}\n✅ Shift started: {start.strftime('%b %d, %Y %I:%M %p')} (PH)\n\n"
     any_found = False
     for page, amt in sorted(totals.items()):
         goal = shift_goals.get(page, 0)
@@ -1281,6 +1228,7 @@ async def quota_period(update: Update, context: ContextTypes.DEFAULT_TYPE, days:
     if not await require_registered_admin(update, 1):
         return
 
+    chat_id_ = update.effective_chat.id
     cutoff = now_ph() - timedelta(days=days)
 
     with db.cursor() as cur:
@@ -1288,11 +1236,11 @@ async def quota_period(update: Update, context: ContextTypes.DEFAULT_TYPE, days:
             """
             SELECT page, SUM(amount) AS total
             FROM sales
-            WHERE team=%s AND ts >= %s
+            WHERE team=%s AND chat_id=%s AND ts >= %s
             GROUP BY page
             ORDER BY total DESC
             """,
-            (team, cutoff)
+            (team, chat_id_, cutoff)
         )
         rows = cur.fetchall()
 
@@ -1305,9 +1253,9 @@ async def quota_period(update: Update, context: ContextTypes.DEFAULT_TYPE, days:
             totals[page] = float(val)
 
     if not totals:
-        return await update.message.reply_text(f"No sales found for the last {days} days.")
+        return await update.message.reply_text(f"No sales found for THIS GC for the last {days} days.")
 
-    msg = f"📊 {title} — {team}\n"
+    msg = f"📊 {title} — {team}\n📍 This GC only\n"
     msg += f"🗓️ From: {cutoff.strftime('%b %d, %Y %I:%M %p')} (PH)\n"
     msg += f"🗓️ To:   {now_ph().strftime('%b %d, %Y %I:%M %p')} (PH)\n\n"
 
@@ -1341,10 +1289,9 @@ async def editgoalboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     amount_str = parts[-1]
     page_str = " ".join(parts[:-1])
-
     page = canonicalize_page_name(page_str)
     if page is None:
-        return await update.message.reply_text("Invalid page/tag. Use a valid page name or hashtag tag.")
+        return await update.message.reply_text("Invalid page/tag. Use valid name or hashtag tag.")
 
     try:
         amount = float(amount_str)
@@ -1374,10 +1321,9 @@ async def editpagegoals(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     amount_str = parts[-1]
     page_str = " ".join(parts[:-1])
-
     page = canonicalize_page_name(page_str)
     if page is None:
-        return await update.message.reply_text("Invalid page/tag. Use a valid page name or hashtag tag.")
+        return await update.message.reply_text("Invalid page/tag. Use valid name or hashtag tag.")
 
     try:
         amount = float(amount_str)
@@ -1387,7 +1333,6 @@ async def editpagegoals(update: Update, context: ContextTypes.DEFAULT_TYPE):
     manual_page_totals[page] = amount
     db_upsert_override(page, page_total=amount)
     db_add_team_page(team, page)
-
     await update.message.reply_text(f"✅ Updated quotas\n{page} = ${amount:.2f} (15/30 days)")
 
 async def cleargoalboardoverride(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1399,13 +1344,11 @@ async def cleargoalboardoverride(update: Update, context: ContextTypes.DEFAULT_T
 
     raw = update.message.text.replace("/cleargoalboardoverride", "", 1).strip()
     if not raw:
-        return await update.message.reply_text(
-            "Format: /cleargoalboardoverride PAGE\nExample: /cleargoalboardoverride AUTUMN PAID"
-        )
+        return await update.message.reply_text("Format: /cleargoalboardoverride PAGE")
 
     page = canonicalize_page_name(raw)
     if page is None:
-        return await update.message.reply_text("Invalid page/tag. Use a valid page name or hashtag tag.")
+        return await update.message.reply_text("Invalid page/tag.")
 
     manual_shift_totals[page] = 0.0
     db_clear_override_shift(page)
@@ -1420,13 +1363,11 @@ async def clearpageoverride(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     raw = update.message.text.replace("/clearpageoverride", "", 1).strip()
     if not raw:
-        return await update.message.reply_text(
-            "Format: /clearpageoverride PAGE\nExample: /clearpageoverride AUTUMN PAID"
-        )
+        return await update.message.reply_text("Format: /clearpageoverride PAGE")
 
     page = canonicalize_page_name(raw)
     if page is None:
-        return await update.message.reply_text("Invalid page/tag. Use a valid page name or hashtag tag.")
+        return await update.message.reply_text("Invalid page/tag.")
 
     manual_page_totals[page] = 0.0
     db_clear_override_page(page)
@@ -1450,11 +1391,9 @@ def db_delete_team_by_name(team_name: str):
         cur.execute("DELETE FROM teams WHERE name=%s", (team_name,))
         cur.execute("DELETE FROM report_groups WHERE team=%s", (team_name,))
         cur.execute("DELETE FROM team_pages WHERE team=%s", (team_name,))
-        # sales history stays by design
+        # sales history stays
 
 async def listteams(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type == "private":
-        pass
     if not await require_owner(update):
         return
 
@@ -1469,8 +1408,6 @@ async def listteams(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg)
 
 async def deleteteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type == "private":
-        pass
     if not await require_owner(update):
         return
 
@@ -1488,13 +1425,10 @@ async def deleteteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if 1 <= idx <= len(teams):
             target = teams[idx - 1][0]
     else:
-        if arg.lower().startswith("team "):
-            target = arg
-        else:
-            for name, _ in teams:
-                if name.lower() == arg.lower():
-                    target = name
-                    break
+        for name, _ in teams:
+            if name.lower() == arg.lower():
+                target = name
+                break
 
     if not target:
         return await update.message.reply_text("Team not found. Use /listteams to see the list.")
@@ -1504,7 +1438,7 @@ async def deleteteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"🗑️ Deleted team registration: {target}\n(History sales are kept.)")
 
 # ----------------- SCHEDULED GOALBOARD (TABLE) -----------------
-def _build_goalboard_table_lines(team: str, start: datetime):
+def _build_goalboard_table_lines_for_chat(team: str, chat_id: int, start: datetime):
     now = now_ph()
     label = current_shift_label(now)
 
@@ -1513,10 +1447,10 @@ def _build_goalboard_table_lines(team: str, start: datetime):
             """
             SELECT page, COALESCE(SUM(amount), 0) AS total
             FROM sales
-            WHERE team=%s AND ts >= %s
+            WHERE team=%s AND chat_id=%s AND ts >= %s
             GROUP BY page
             """,
-            (team, start)
+            (team, chat_id, start)
         )
         rows = cur.fetchall()
 
@@ -1531,7 +1465,6 @@ def _build_goalboard_table_lines(team: str, start: datetime):
     team_pages = set(db_get_team_pages(team))
     team_pages |= set(totals.keys())
     team_pages |= set(shift_goals.keys())
-
     all_pages = sorted(team_pages)
 
     PAGE_W = 26
@@ -1551,10 +1484,8 @@ def _build_goalboard_table_lines(team: str, start: datetime):
     for page in all_pages:
         amt = float(totals.get(page, 0.0))
         goal = float(shift_goals.get(page, 0.0))
-
         pct = (amt / goal * 100.0) if goal > 0 else 0.0
         color = get_color(pct) if goal > 0 else "⚪"
-
         grand_sales += amt
 
         row = (
@@ -1568,6 +1499,7 @@ def _build_goalboard_table_lines(team: str, start: datetime):
 
     header_text = (
         f"🎯 GOALBOARD — {team}\n"
+        f"📍 This GC only (chat_id={chat_id})\n"
         f"🕒 Shift: {label}\n"
         f"✅ Shift started: {start.strftime('%b %d, %Y %I:%M %p')} (PH)\n"
         f"📌 Updated: {now.strftime('%b %d, %Y %I:%M %p')} (PH)\n"
@@ -1634,6 +1566,8 @@ async def send_scheduled_goalboard(context: ContextTypes.DEFAULT_TYPE):
 
     global_dest = db_get_global_report_dest()
 
+    # GLOBAL MODE: For each team, we sum per TEAM but across all its registered chat_ids
+    # (Still "team GCs only" because it uses registered team chat_ids)
     if global_dest:
         dest_chat_id, dest_thread_id = global_dest
         teams = db_list_all_teams()
@@ -1641,8 +1575,84 @@ async def send_scheduled_goalboard(context: ContextTypes.DEFAULT_TYPE):
             return
 
         for team in teams:
-            header_text, lines = _build_goalboard_table_lines(team, start)
-            msgs = _chunk_team_table_messages(team, header_text, lines)
+            chat_ids = db_team_chat_ids(team)
+            if not chat_ids:
+                continue
+
+            # Build one combined header + lines by merging per chat_id totals
+            # Simple approach: query sum for team across chat_ids in one SQL
+            with db.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT page, COALESCE(SUM(amount), 0) AS total
+                    FROM sales
+                    WHERE team=%s AND chat_id = ANY(%s) AND ts >= %s
+                    GROUP BY page
+                    """,
+                    (team, chat_ids, start)
+                )
+                rows = cur.fetchall()
+
+            totals = defaultdict(float)
+            for page, total in rows:
+                totals[str(page)] = float(total)
+
+            for page, val in manual_shift_totals.items():
+                if float(val) != 0:
+                    totals[page] = float(val)
+
+            team_pages = set(db_get_team_pages(team))
+            team_pages |= set(totals.keys())
+            team_pages |= set(shift_goals.keys())
+            all_pages = sorted(team_pages)
+
+            # render like table builder
+            PAGE_W, SALES_W, GOAL_W, PCT_W = 26, 10, 10, 7
+
+            def trunc(s: str, w: int):
+                s = str(s)
+                if len(s) <= w:
+                    return s.ljust(w)
+                return (s[: w - 1] + "…")
+
+            table_rows = []
+            grand_sales = 0.0
+            label = current_shift_label(now)
+
+            for page in all_pages:
+                amt = float(totals.get(page, 0.0))
+                goal = float(shift_goals.get(page, 0.0))
+                pct = (amt / goal * 100.0) if goal > 0 else 0.0
+                color = get_color(pct) if goal > 0 else "⚪"
+                grand_sales += amt
+
+                row = (
+                    f"{color} "
+                    f"{trunc(page, PAGE_W)} "
+                    f"{('$' + format(amt, '.2f')).rjust(SALES_W)} "
+                    f"{('$' + format(goal, '.2f')).rjust(GOAL_W) if goal > 0 else ' ' * GOAL_W} "
+                    f"{(format(pct, '.1f') + '%').rjust(PCT_W) if goal > 0 else ' ' * PCT_W}"
+                )
+                table_rows.append(row)
+
+            header_text = (
+                f"🎯 GOALBOARD — {team}\n"
+                f"📍 Team total (registered team GCs)\n"
+                f"🕒 Shift: {label}\n"
+                f"✅ Shift started: {start.strftime('%b %d, %Y %I:%M %p')} (PH)\n"
+                f"📌 Updated: {now.strftime('%b %d, %Y %I:%M %p')} (PH)\n"
+                f"💰 Shift Total: ${grand_sales:.2f}\n"
+            )
+
+            col_header = (
+                f"   {'PAGE'.ljust(PAGE_W)} "
+                f"{'SALES'.rjust(SALES_W)} "
+                f"{'GOAL'.rjust(GOAL_W)} "
+                f"{'%'.rjust(PCT_W)}"
+            )
+            sep = "-" * (3 + PAGE_W + 1 + SALES_W + 1 + GOAL_W + 1 + PCT_W)
+
+            msgs = _chunk_team_table_messages(team, header_text, [col_header, sep] + table_rows)
 
             for m in msgs:
                 await safe_send(
@@ -1654,12 +1664,13 @@ async def send_scheduled_goalboard(context: ContextTypes.DEFAULT_TYPE):
                 )
         return
 
+    # PER-TEAM MODE: each team posts to its registered destination chat_id and uses THAT chat_id's sales only
     report_groups = db_get_report_groups()
     if not report_groups:
         return
 
     for team, chat_id, thread_id in report_groups:
-        header_text, lines = _build_goalboard_table_lines(team, start)
+        header_text, lines = _build_goalboard_table_lines_for_chat(team, chat_id, start)
         msgs = _chunk_team_table_messages(team, header_text, lines)
 
         for m in msgs:
@@ -1685,7 +1696,7 @@ def main():
     # basic
     app.add_handler(CommandHandler("chatid", chatid))
 
-    # ✅ NEW commands
+    # ✅ new commands
     app.add_handler(CommandHandler("sales", sales))
     app.add_handler(CommandHandler("edit", edit))
 
@@ -1721,7 +1732,7 @@ def main():
     app.add_handler(CommandHandler("cleargoalboardoverride", cleargoalboardoverride))
     app.add_handler(CommandHandler("clearpageoverride", clearpageoverride))
 
-    # schedule: 8AM, 10AM, 12PM, 2PM, 4PM, 6PM, 8PM, 10PM (PH)
+    # schedule
     report_hours = [8, 10, 12, 14, 16, 18, 20, 22]
     for h in report_hours:
         app.job_queue.run_daily(
