@@ -1,693 +1,372 @@
 import os
-import re
-import bcrypt
-import secrets
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+from collections import defaultdict
+from decimal import InvalidOperation
+
+import psycopg2
+from psycopg2.pool import SimpleConnectionPool
 
 from fastapi import FastAPI, HTTPException, Header
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import psycopg2
-import httpx
+
 
 # =========================
-# CONFIG
+# TIMEZONE
+# =========================
+PH_TZ = ZoneInfo("Asia/Manila")
+
+
+# =========================
+# DATABASE
 # =========================
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
-    raise RuntimeError("DATABASE_URL missing")
+    raise RuntimeError("DATABASE_URL not set")
 
-db = psycopg2.connect(DATABASE_URL, sslmode="require")
-db.autocommit = True
 
-RESEND_API_KEY = os.getenv("RESEND_API_KEY")
-FROM_EMAIL = os.getenv("FROM_EMAIL", "onboarding@resend.dev")  # Resend default testing sender
-DEBUG_RETURN_RESET_CODE = os.getenv("DEBUG_RETURN_RESET_CODE", "").strip() == "1"
+# =========================
+# OPTIONAL API AUTH
+# =========================
+API_TOKEN = os.getenv("API_TOKEN")  # set in Railway Variables
 
-FIXED_INVITE_CODE = os.getenv("FIXED_INVITE_CODE", "TASTY-ACCESS").strip()
-OTP_TTL_MINUTES = int(os.getenv("OTP_TTL_MINUTES", "15"))
 
-app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # tighten later
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+# =========================
+# CONNECTION POOL
+# =========================
+pool = SimpleConnectionPool(
+    minconn=1,
+    maxconn=10,
+    dsn=DATABASE_URL,
+    sslmode="require",
 )
+
+
+def get_conn():
+    return pool.getconn()
+
+
+def put_conn(conn):
+    pool.putconn(conn)
+
 
 # =========================
 # HELPERS
 # =========================
-EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+def now_ph() -> datetime:
+    return datetime.now(PH_TZ)
 
 
-def now_utc():
-    return datetime.now(timezone.utc)
+def require_token(authorization: str | None):
+    # If API_TOKEN not set, endpoint stays public
+    if not API_TOKEN:
+        return
 
-
-def normalize_email(email: str) -> str:
-    e = (email or "").strip().lower()
-    if not e or "@" not in e:
-        return e
-
-    local, domain = e.split("@", 1)
-
-    # Gmail normalization: remove +tag so test+1@gmail.com == test@gmail.com
-    if domain in ("gmail.com", "googlemail.com"):
-        if "+" in local:
-            local = local.split("+", 1)[0]
-        e = f"{local}@{domain}"
-
-    return e
-
-
-def validate_email(email: str):
-    if not email or not EMAIL_RE.match(email):
-        raise HTTPException(400, "Invalid email format")
-
-
-def hash_pw(pw: str) -> str:
-    return bcrypt.hashpw(pw.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-
-
-def check_pw(pw: str, h: str) -> bool:
-    return bcrypt.checkpw(pw.encode("utf-8"), h.encode("utf-8"))
-
-
-def new_token() -> str:
-    return secrets.token_urlsafe(32)
-
-
-def new_reset_code() -> str:
-    return f"{secrets.randbelow(1_000_000):06d}"
-
-
-def get_bearer_token(authorization: str | None) -> str | None:
     if not authorization:
-        return None
-    parts = authorization.split(" ", 1)
-    if len(parts) != 2:
-        return None
-    scheme, value = parts[0].strip().lower(), parts[1].strip()
-    if scheme != "bearer" or not value:
-        return None
-    return value
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
 
-
-def table_columns(table_name: str) -> set[str]:
-    with db.cursor() as cur:
-        cur.execute(
-            """
-            SELECT column_name
-            FROM information_schema.columns
-            WHERE table_schema='public' AND table_name=%s
-            """,
-            (table_name,),
-        )
-        return {r[0] for r in cur.fetchall()}
-
-
-def column_type(table_name: str, column_name: str) -> str | None:
-    with db.cursor() as cur:
-        cur.execute(
-            """
-            SELECT data_type
-            FROM information_schema.columns
-            WHERE table_schema='public' AND table_name=%s AND column_name=%s
-            """,
-            (table_name, column_name),
-        )
-        row = cur.fetchone()
-        return row[0] if row else None
-
-
-def safe_add_column(table: str, coldef: str):
-    with db.cursor() as cur:
-        cur.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {coldef};")
-
-
-def is_used(v) -> bool:
-    if v is None:
-        return False
-    if isinstance(v, bool):
-        return v
-    if isinstance(v, int):
-        return v != 0
-    s = str(v).strip().lower()
-    return s in ("1", "t", "true", "yes", "y")
-
-
-def used_value_for_db(value_bool: bool):
-    """
-    Returns the right value type for invites.used (bool or int)
-    depending on column type in DB.
-    """
-    t = column_type("invites", "used")
-    if t in ("integer", "bigint", "smallint"):
-        return 1 if value_bool else 0
-    # default boolean
-    return bool(value_bool)
-
-
-def require_token(authorization: str | None, token_query: str | None) -> str:
-    t = get_bearer_token(authorization) or token_query
-    if not t:
-        raise HTTPException(401, "Missing token")
-    return t
-
-
-def get_user_id_from_token(token: str) -> int:
-    with db.cursor() as cur:
-        cur.execute(
-            "SELECT user_id FROM sessions WHERE token=%s AND expires > now()",
-            (token,),
-        )
-        row = cur.fetchone()
-    if not row or not row[0]:
-        raise HTTPException(401, "Invalid or expired session")
-    return int(row[0])
-
-
-def delete_user_account(user_id: int):
-    """
-    Permanently deletes the user and related auth data.
-    """
-    with db.cursor() as cur:
-        cur.execute("SELECT email FROM users WHERE id=%s", (user_id,))
-        row = cur.fetchone()
-        if not row:
-            raise HTTPException(404, "User not found")
-        email = row[0]
-
-        # log out everywhere
-        cur.execute("DELETE FROM sessions WHERE user_id=%s", (user_id,))
-
-        # remove reset codes
-        cur.execute("DELETE FROM password_resets WHERE email=%s", (email,))
-
-        # delete user
-        cur.execute("DELETE FROM users WHERE id=%s", (user_id,))
+    expected = f"Bearer {API_TOKEN}"
+    if authorization.strip() != expected:
+        raise HTTPException(status_code=401, detail="Invalid token")
 
 
 # =========================
-# EMAIL (RESEND)
+# DB INIT (SAFE)
 # =========================
-async def send_reset_code_email(to_email: str, code: str, minutes_valid: int):
-    if not RESEND_API_KEY:
-        raise HTTPException(500, "Email service not configured (RESEND_API_KEY missing)")
+def init_db_safe():
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS teams (
+                    chat_id BIGINT PRIMARY KEY,
+                    name TEXT NOT NULL
+                );
+            """)
 
-    subject = "Your password reset code"
-    html = f"""
-    <div style="font-family: Arial, sans-serif; line-height: 1.4;">
-      <h2>Password reset</h2>
-      <p>Your 6-digit code is:</p>
-      <div style="font-size: 28px; font-weight: 800; letter-spacing: 6px; margin: 12px 0;">
-        {code}
-      </div>
-      <p>This code expires in <b>{minutes_valid} minutes</b>.</p>
-      <p>If you didn’t request this, you can ignore this email.</p>
-    </div>
-    """
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS sales (
+                    id BIGSERIAL PRIMARY KEY,
+                    chat_id BIGINT,
+                    team TEXT NOT NULL,
+                    page TEXT NOT NULL,
+                    amount NUMERIC NOT NULL,
+                    ts TIMESTAMPTZ NOT NULL DEFAULT now()
+                );
+            """)
 
-    payload = {
-        "from": FROM_EMAIL,
-        "to": [to_email],
-        "subject": subject,
-        "html": html,
-    }
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS page_goals (
+                    team TEXT NOT NULL,
+                    page TEXT NOT NULL,
+                    goal NUMERIC NOT NULL,
+                    PRIMARY KEY (team, page)
+                );
+            """)
 
-    async with httpx.AsyncClient(timeout=20) as client:
-        r = await client.post(
-            "https://api.resend.com/emails",
-            headers={
-                "Authorization": f"Bearer {RESEND_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-        )
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_sales_team_ts ON sales(team, ts);")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_sales_team_page ON sales(team, page);")
 
-    if r.status_code >= 400:
-        raise HTTPException(500, f"Failed to send email: {r.text}")
+        conn.commit()
+    finally:
+        put_conn(conn)
 
 
 # =========================
-# DB INIT + MIGRATIONS
+# APP
 # =========================
-def init_db():
-    with db.cursor() as cur:
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                id BIGSERIAL PRIMARY KEY,
-                email TEXT UNIQUE NOT NULL,
-                username TEXT,
-                password_hash TEXT NOT NULL,
-                pin_hash TEXT,
-                created_at TIMESTAMPTZ DEFAULT now()
-            );
+app = FastAPI(title="Sales Bot API")
+init_db_safe()
 
-            CREATE TABLE IF NOT EXISTS invites (
-                code TEXT PRIMARY KEY,
-                used BOOLEAN DEFAULT FALSE,
-                created_at TIMESTAMPTZ DEFAULT now(),
-                used_by BIGINT,
-                used_at TIMESTAMPTZ
-            );
 
-            CREATE TABLE IF NOT EXISTS sessions (
-                token TEXT PRIMARY KEY,
-                user_id BIGINT,
-                expires TIMESTAMPTZ NOT NULL,
-                created_at TIMESTAMPTZ DEFAULT now()
-            );
+# =========================
+# HEALTH
+# =========================
+@app.get("/health")
+def health():
+    return {"ok": True}
 
-            CREATE TABLE IF NOT EXISTS password_resets (
-                id BIGSERIAL PRIMARY KEY,
-                email TEXT NOT NULL,
-                token_hash TEXT NOT NULL,
-                expires_at TIMESTAMPTZ NOT NULL,
-                used BOOLEAN DEFAULT FALSE,
-                created_at TIMESTAMPTZ DEFAULT now()
-            );
-            """
-        )
 
-    # Safe migrations
-    safe_add_column("users", "username TEXT")
-    safe_add_column("users", "pin_hash TEXT")
-    safe_add_column("users", "created_at TIMESTAMPTZ DEFAULT now()")
+@app.get("/dbtest")
+def dbtest():
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1;")
+            row = cur.fetchone()
+            return {"db_ok": bool(row and row[0] == 1)}
+    finally:
+        put_conn(conn)
 
-    safe_add_column("invites", "used_by BIGINT")
-    safe_add_column("invites", "used_at TIMESTAMPTZ")
-    safe_add_column("invites", "created_at TIMESTAMPTZ DEFAULT now()")
 
-    safe_add_column("sessions", "user_id BIGINT")
-    safe_add_column("sessions", "expires TIMESTAMPTZ")
-    safe_add_column("sessions", "created_at TIMESTAMPTZ DEFAULT now()")
+# =========================
+# TEAMS
+# =========================
+@app.get("/teams")
+def teams(authorization: str | None = Header(default=None)):
+    require_token(authorization)
 
-    # password_resets compatibility (older columns)
-    safe_add_column("password_resets", "token_hash TEXT")
-    safe_add_column("password_resets", "code_hash TEXT")
-    safe_add_column("password_resets", "expires TIMESTAMPTZ")
-    safe_add_column("password_resets", "expires_at TIMESTAMPTZ")
-    safe_add_column("password_resets", "used BOOLEAN DEFAULT FALSE")
-    safe_add_column("password_resets", "created_at TIMESTAMPTZ DEFAULT now()")
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT DISTINCT name FROM teams ORDER BY name;")
+            rows = cur.fetchall()
+            return {"teams": [r[0] for r in rows]}
+    finally:
+        put_conn(conn)
 
-    with db.cursor() as cur:
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users (email);")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions (user_id);")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions (expires);")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_resets_email_created ON password_resets (email, created_at);")
 
-    # ✅ Ensure the FIXED_INVITE_CODE exists (unlimited)
-    with db.cursor() as cur:
-        cols = table_columns("invites")
-        if "used" in cols:
+@app.post("/teams")
+def upsert_team(payload: dict, authorization: str | None = Header(default=None)):
+    require_token(authorization)
+
+    chat_id = payload.get("chat_id")
+    name = (payload.get("name") or "").strip()
+
+    if not chat_id or not name:
+        raise HTTPException(status_code=400, detail="chat_id and name are required")
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO invites (code, used)
+                INSERT INTO teams (chat_id, name)
                 VALUES (%s, %s)
-                ON CONFLICT (code) DO NOTHING
+                ON CONFLICT (chat_id)
+                DO UPDATE SET name = EXCLUDED.name;
                 """,
-                (FIXED_INVITE_CODE, used_value_for_db(False)),
+                (int(chat_id), name),
             )
-        else:
-            cur.execute(
-                """
-                INSERT INTO invites (code)
-                VALUES (%s)
-                ON CONFLICT (code) DO NOTHING
-                """,
-                (FIXED_INVITE_CODE,),
-            )
-
-
-init_db()
-
-# =========================
-# MODELS
-# =========================
-class InviteReq(BaseModel):
-    code: str
-
-
-class RegisterReq(BaseModel):
-    invite_code: str
-    username: str
-    email: str
-    password: str
-
-
-class LoginReq(BaseModel):
-    email: str
-    password: str
-
-
-class PinReq(BaseModel):
-    pin: str
-
-
-class UnlockReq(BaseModel):
-    pin: str
-
-
-class ForgotReq(BaseModel):
-    email: str
-
-
-class ResetReq(BaseModel):
-    email: str
-    reset_code: str
-    new_password: str
-
-
-class DeleteAccountReq(BaseModel):
-    password: str
-    pin: str | None = None
+        conn.commit()
+        return {"ok": True}
+    finally:
+        put_conn(conn)
 
 
 # =========================
-# INVITE
+# PAGE GOALS (DICT VERSION)
 # =========================
-@app.post("/invite/verify")
-def verify_invite(body: InviteReq):
-    code = (body.code or "").strip()
-    if not code:
-        raise HTTPException(400, "Invalid invite code")
+@app.post("/pagegoal")
+def set_page_goal(payload: dict, authorization: str | None = Header(default=None)):
+    require_token(authorization)
 
-    # ✅ unlimited invite always valid
-    if code == FIXED_INVITE_CODE:
-        return {"ok": True, "unlimited": True}
+    team = (payload.get("team") or "").strip()
+    page = (payload.get("page") or "").strip()
+    goal = payload.get("goal")
 
-    with db.cursor() as cur:
-        cur.execute("SELECT used FROM invites WHERE code=%s", (code,))
-        row = cur.fetchone()
-        if not row:
-            raise HTTPException(400, "Invalid invite code")
-
-        if is_used(row[0]):
-            raise HTTPException(400, "Invite already used")
-
-    return {"ok": True, "unlimited": False}
-
-
-# =========================
-# REGISTER
-# =========================
-@app.post("/auth/register")
-def register(body: RegisterReq):
-    email = normalize_email(body.email)
-    username = (body.username or "").strip()
-    invite_code = (body.invite_code or "").strip()
-
-    validate_email(email)
-
-    if len(body.password or "") < 6:
-        raise HTTPException(400, "Password must be at least 6 characters")
-
-    # ✅ Check invite (unlimited passes)
-    if invite_code != FIXED_INVITE_CODE:
-        with db.cursor() as cur:
-            cur.execute("SELECT used FROM invites WHERE code=%s", (invite_code,))
-            inv = cur.fetchone()
-        if not inv:
-            raise HTTPException(400, "Invalid invite code")
-        if is_used(inv[0]):
-            raise HTTPException(400, "Invite already used")
-
-    pw_hash = hash_pw(body.password)
+    if not team or not page or goal is None:
+        raise HTTPException(status_code=400, detail="team, page, goal are required")
 
     try:
-        with db.cursor() as cur:
+        goal_val = float(goal)
+    except Exception:
+        raise HTTPException(status_code=400, detail="goal must be a number")
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO users (email, username, password_hash)
+                INSERT INTO page_goals (team, page, goal)
                 VALUES (%s, %s, %s)
-                RETURNING id
+                ON CONFLICT (team, page)
+                DO UPDATE SET goal = EXCLUDED.goal;
                 """,
-                (email, username, pw_hash),
+                (team, page, goal_val),
             )
-            user_id = cur.fetchone()[0]
-
-            # ✅ Mark single-use invites as used (NOT the unlimited one)
-            if invite_code != FIXED_INVITE_CODE:
-                cur.execute(
-                    "UPDATE invites SET used=%s, used_by=%s, used_at=now() WHERE code=%s",
-                    (used_value_for_db(True), user_id, invite_code),
-                )
-    except Exception as e:
-        msg = str(e).lower()
-        if "duplicate" in msg or "unique" in msg:
-            raise HTTPException(400, "Email already exists")
-        raise HTTPException(500, "Registration failed")
-
-    token = new_token()
-    expires = now_utc() + timedelta(days=7)
-
-    with db.cursor() as cur:
-        cur.execute(
-            "INSERT INTO sessions (token, user_id, expires) VALUES (%s, %s, %s)",
-            (token, user_id, expires),
-        )
-
-    return {"ok": True, "token": token, "needs_pin": True}
+        conn.commit()
+        return {"ok": True}
+    finally:
+        put_conn(conn)
 
 
 # =========================
-# LOGIN
+# SUMMARY
 # =========================
-@app.post("/auth/login")
-def login(body: LoginReq):
-    email = normalize_email(body.email)
-    validate_email(email)
-
-    with db.cursor() as cur:
-        cur.execute("SELECT id, password_hash, pin_hash FROM users WHERE email=%s", (email,))
-        row = cur.fetchone()
-
-    if not row or not check_pw(body.password, row[1]):
-        raise HTTPException(401, "Invalid credentials")
-
-    token = new_token()
-    expires = now_utc() + timedelta(days=7)
-
-    with db.cursor() as cur:
-        cur.execute(
-            "INSERT INTO sessions (token, user_id, expires) VALUES (%s, %s, %s)",
-            (token, row[0], expires),
-        )
-
-    return {"ok": True, "token": token, "needs_pin": row[2] is None}
-
-
-# =========================
-# CREATE PIN
-# =========================
-@app.post("/auth/create-pin")
-def create_pin(body: PinReq, token: str | None = None, authorization: str | None = Header(default=None)):
-    t = require_token(authorization, token)
-
-    pin = (body.pin or "").strip()
-    if len(pin) < 4:
-        raise HTTPException(400, "PIN too short (min 4 digits)")
-
-    user_id = get_user_id_from_token(t)
-
-    with db.cursor() as cur:
-        cur.execute("UPDATE users SET pin_hash=%s WHERE id=%s", (hash_pw(pin), user_id))
-
-    return {"ok": True}
-
-
-# =========================
-# UNLOCK (PIN)
-# =========================
-@app.post("/unlock")
-def unlock(body: UnlockReq, token: str | None = None, authorization: str | None = Header(default=None)):
-    t = require_token(authorization, token)
-    user_id = get_user_id_from_token(t)
-
-    with db.cursor() as cur:
-        cur.execute("SELECT pin_hash FROM users WHERE id=%s", (user_id,))
-        row = cur.fetchone()
-
-    if not row or not row[0]:
-        raise HTTPException(400, "PIN not set")
-
-    if not check_pw((body.pin or "").strip(), row[0]):
-        raise HTTPException(401, "Invalid PIN")
-
-    return {"ok": True}
-
-
-# =========================
-# FORGOT PASSWORD
-# =========================
-@app.post("/password/forgot")
-async def password_forgot(body: ForgotReq):
-    email = normalize_email(body.email)
-    validate_email(email)
-
-    with db.cursor() as cur:
-        cur.execute("SELECT id FROM users WHERE email=%s", (email,))
-        user = cur.fetchone()
-
-    if not user:
-        raise HTTPException(404, "Email not found")
-
-    code = new_reset_code()
-    expires_dt = now_utc() + timedelta(minutes=OTP_TTL_MINUTES)
-    code_h = hash_pw(code)
-
-    cols = table_columns("password_resets")
-
-    insert_cols = ["email"]
-    insert_vals = [email]
-
-    if "token_hash" in cols:
-        insert_cols.append("token_hash")
-        insert_vals.append(code_h)
-    if "code_hash" in cols:
-        insert_cols.append("code_hash")
-        insert_vals.append(code_h)
-
-    if "expires_at" in cols:
-        insert_cols.append("expires_at")
-        insert_vals.append(expires_dt)
-    if "expires" in cols:
-        insert_cols.append("expires")
-        insert_vals.append(expires_dt)
-
-    if "used" in cols:
-        insert_cols.append("used")
-        insert_vals.append(False)
-
-    if "created_at" in cols:
-        insert_cols.append("created_at")
-        insert_vals.append(now_utc())
-
-    if len(insert_cols) < 3:
-        raise HTTPException(500, f"password_resets schema unexpected: {sorted(list(cols))}")
-
-    placeholders = ", ".join(["%s"] * len(insert_cols))
-    col_sql = ", ".join(insert_cols)
-
-    with db.cursor() as cur:
-        cur.execute(
-            f"INSERT INTO password_resets ({col_sql}) VALUES ({placeholders})",
-            tuple(insert_vals),
-        )
-
-    # ✅ Send email (Resend)
-    await send_reset_code_email(email, code, minutes_valid=OTP_TTL_MINUTES)
-
-    if DEBUG_RETURN_RESET_CODE:
-        return {"ok": True, "expires_in_minutes": OTP_TTL_MINUTES, "debug_code": code}
-
-    return {"ok": True, "expires_in_minutes": OTP_TTL_MINUTES}
-
-
-# =========================
-# RESET PASSWORD
-# =========================
-@app.post("/password/reset")
-def password_reset(body: ResetReq):
-    email = normalize_email(body.email)
-    validate_email(email)
-
-    if len(body.new_password or "") < 6:
-        raise HTTPException(400, "New password must be at least 6 characters")
-
-    code = (body.reset_code or "").strip()
-    if len(code) != 6:
-        raise HTTPException(400, "Invalid reset code")
-
-    cols = table_columns("password_resets")
-
-    expiry_col = "expires_at" if "expires_at" in cols else ("expires" if "expires" in cols else None)
-    if not expiry_col:
-        raise HTTPException(500, f"password_resets missing expires column: {sorted(list(cols))}")
-
-    hash_cols = []
-    if "token_hash" in cols:
-        hash_cols.append("token_hash")
-    if "code_hash" in cols:
-        hash_cols.append("code_hash")
-    if not hash_cols:
-        raise HTTPException(500, f"password_resets missing hash column: {sorted(list(cols))}")
-
-    with db.cursor() as cur:
-        cur.execute(
-            f"""
-            SELECT id, {", ".join(hash_cols)}
-            FROM password_resets
-            WHERE email=%s
-              AND (used=FALSE OR used IS NULL)
-              AND {expiry_col} > now()
-            ORDER BY created_at DESC NULLS LAST, id DESC
-            LIMIT 1
-            """,
-            (email,),
-        )
-        rr = cur.fetchone()
-
-    if not rr:
-        raise HTTPException(400, "Reset code expired or not found")
-
-    reset_id = rr[0]
-
-    stored_hash = None
-    for h in rr[1:]:
-        if h:
-            stored_hash = h
-            break
-
-    if not stored_hash or not check_pw(code, stored_hash):
-        raise HTTPException(400, "Wrong reset code")
-
-    with db.cursor() as cur:
-        cur.execute("UPDATE users SET password_hash=%s WHERE email=%s", (hash_pw(body.new_password), email))
-        if "used" in cols:
-            cur.execute("UPDATE password_resets SET used=TRUE WHERE id=%s", (reset_id,))
-
-    return {"ok": True}
-
-
-# =========================
-# DELETE ACCOUNT (APPLE 5.1.1(v))
-# =========================
-@app.post("/auth/delete-account")
-def delete_account(
-    body: DeleteAccountReq,
-    token: str | None = None,
+@app.get("/summary")
+def summary(
+    days: int = 15,
+    team: str = "Team 1",
     authorization: str | None = Header(default=None),
 ):
-    t = require_token(authorization, token)
-    user_id = get_user_id_from_token(t)
+    require_token(authorization)
 
-    pw = (body.password or "").strip()
-    if not pw:
-        raise HTTPException(400, "Password required")
+    if days not in (15, 30):
+        raise HTTPException(status_code=400, detail="days must be 15 or 30")
 
-    with db.cursor() as cur:
-        cur.execute("SELECT password_hash, pin_hash FROM users WHERE id=%s", (user_id,))
-        row = cur.fetchone()
+    team = (team or "").strip()
+    if not team:
+        raise HTTPException(status_code=400, detail="team is required")
 
-    if not row:
-        raise HTTPException(404, "User not found")
+    now_utc = datetime.now(timezone.utc)
+    cutoff_utc = now_utc - timedelta(days=days)
 
-    password_hash, pin_hash = row[0], row[1]
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT page, COALESCE(SUM(amount), 0)
+                FROM sales
+                WHERE team = %s AND ts >= %s
+                GROUP BY page
+                ORDER BY page;
+                """,
+                (team, cutoff_utc),
+            )
+            sales_rows = cur.fetchall()
 
-    if not check_pw(pw, password_hash):
-        raise HTTPException(401, "Wrong password")
+        totals = defaultdict(float)
+        for page, sales in sales_rows:
+            try:
+                totals[str(page)] = float(sales)
+            except (TypeError, ValueError, InvalidOperation):
+                totals[str(page)] = 0.0
 
-    # If PIN exists, require it as confirmation
-    if pin_hash:
-        provided_pin = (body.pin or "").strip()
-        if len(provided_pin) < 4 or not check_pw(provided_pin, pin_hash):
-            raise HTTPException(401, "Wrong PIN")
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT page, goal FROM page_goals WHERE team = %s;",
+                (team,),
+            )
+            goal_rows = cur.fetchall()
 
-    delete_user_account(user_id)
-    return {"ok": True}
+        goals = {}
+        for page, goal in goal_rows:
+            try:
+                goals[str(page)] = float(goal)
+            except (TypeError, ValueError, InvalidOperation):
+                goals[str(page)] = 0.0
+
+    finally:
+        put_conn(conn)
+
+    all_pages = set(totals.keys()) | set(goals.keys())
+
+    rows = []
+    total_sales = 0.0
+    total_goal = 0.0
+
+    for page in all_pages:
+        sales = float(totals.get(page, 0.0))
+        goal = float(goals.get(page, 0.0))
+        pct = (sales / goal * 100.0) if goal > 0 else None
+
+        total_sales += sales
+        total_goal += goal
+
+        rows.append({
+            "page": page,
+            "sales": round(sales, 2),
+            "goal": round(goal, 2),
+            "pct": round(pct, 1) if pct is not None else None,
+        })
+
+    rows.sort(key=lambda r: r["sales"], reverse=True)
+
+    overall_pct = (total_sales / total_goal * 100.0) if total_goal > 0 else None
+
+    now_ph_time = now_ph()
+    cutoff_ph_time = now_ph_time - timedelta(days=days)
+
+    return {
+        "team": team,
+        "days": days,
+        "from": cutoff_ph_time.isoformat(),
+        "to": now_ph_time.isoformat(),
+        "total_sales": round(total_sales, 2),
+        "total_goal": round(total_goal, 2),
+        "overall_pct": round(overall_pct, 1) if overall_pct is not None else None,
+        "rows": rows,
+    }
+
+
+# =========================
+# PAGE GOALS (PYDANTIC VERSION)
+# =========================
+class PageGoalPayload(BaseModel):
+    team: str
+    page: str
+    goal: float
+
+
+@app.post("/pagegoal")
+def upsert_page_goal(
+    payload: PageGoalPayload,
+    authorization: str | None = Header(default=None),
+):
+    require_token(authorization)
+
+    team = (payload.team or "").strip()
+    page = (payload.page or "").strip()
+    goal = float(payload.goal)
+
+    if not team:
+        raise HTTPException(status_code=400, detail="team is required")
+    if not page:
+        raise HTTPException(status_code=400, detail="page is required")
+    if goal < 0:
+        raise HTTPException(status_code=400, detail="goal must be >= 0")
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO page_goals (team, page, goal)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (team, page)
+                DO UPDATE SET goal = EXCLUDED.goal;
+                """,
+                (team, page, goal),
+            )
+        conn.commit()
+    finally:
+        put_conn(conn)
+
+    return {
+        "ok": True,
+        "team": team,
+        "page": page,
+        "goal": goal,
+    }
