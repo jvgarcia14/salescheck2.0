@@ -153,7 +153,11 @@ ALLOWED_PAGES = {
     "#islapaid": "Isla Paid",
     "#islawelcome": "Isla Welcome",
 
-    "#juliavip": "Julia Vip",
+    "#jane": "Jane",
+
+    "#jane": "Jane",
+    
+    "#cat": "Cat",
 
     "#kayleexjasmyn": "Kaylee X Jasmyn",
 
@@ -1582,6 +1586,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
