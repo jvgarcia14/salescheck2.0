@@ -129,6 +129,7 @@ ALLOWED_PAGES = {
     "#fanslyteam1": "Fansly Team1",
     "#fanslyteam2": "Fansly Team2",
     "#fanslyteam3": "Fansly Team3",
+    "#fanslyteam4": "Fansly Team4",
 
     "#francescapaid":"Francesca Paid",
 
@@ -1586,6 +1587,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
