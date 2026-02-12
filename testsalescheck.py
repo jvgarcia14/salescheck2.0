@@ -35,6 +35,7 @@ from datetime import datetime, timedelta, time
 from zoneinfo import ZoneInfo
 
 import psycopg2
+from psycopg2 import OperationalError
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.error import RetryAfter, TimedOut, NetworkError, BadRequest
@@ -58,8 +59,26 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN environment variable not set")
 
-db = psycopg2.connect(DATABASE_URL, sslmode="require")
-db.autocommit = True
+def connect_db_with_retry(dsn: str, tries: int = 40, delay: int = 2):
+    """
+    Railway sometimes restarts Postgres or it takes time to be reachable.
+    This prevents your bot from crash-looping on startup.
+    """
+    last = None
+    for i in range(tries):
+        try:
+            conn = psycopg2.connect(dsn, sslmode="require", connect_timeout=5)
+            conn.autocommit = True
+            print("✅ DB connected")
+            return conn
+        except OperationalError as e:
+            last = e
+            print(f"⏳ DB not ready (attempt {i+1}/{tries}): {e}")
+            time.sleep(delay)
+    raise last
+
+
+db = connect_db_with_retry(DATABASE_URL)
 
 # Telegram hard limit is 4096 chars/message
 TG_MAX = 4096
@@ -1589,6 +1608,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
