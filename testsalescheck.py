@@ -193,9 +193,7 @@ ALLOWED_PAGES = {
 # =============================
 
 t = normalize_tag(str(tag).lstrip("#"))
-    """
-    Normalizes '#Test_5' -> '#test5' so your bot recognizes it.
-    """
+
     if not tag:
         return ""
     t = str(tag).strip().lower()
@@ -1602,4 +1600,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
