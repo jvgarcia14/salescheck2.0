@@ -1,3 +1,4 @@
+
 # ==========================================
 #   ULTIMATE SALES + GOAL BOT (RAILWAY) - DB VERSION + AUTO GOALBOARD REPORTS (TOPIC SUPPORT)
 #   - Saves sales/goals/admins/teams/overrides to Postgres
@@ -22,17 +23,13 @@
 #         • a sale is recorded for that page, OR
 #         • you set a goal for that page in that team
 #
-#   ✅ NEW (WEBSITE PAGES AUTO-DETECT)
-#     - Loads pages from your WEBSITE DB (pages table) and merges into ALLOWED_PAGES
-#     - Auto-refresh every 60 seconds so new website pages are recognized "near real-time"
-#
 #   ✅ NO MORE SILENT FAILURES
 #     - logs RetryAfter (flood control), message-too-long, etc. in Railway logs
 # ==========================================
 
+import time as pytime
 import os
 import traceback
-import time as pytime  # ✅ FIX: avoid conflict with datetime.time (we use pytime.sleep)
 from collections import defaultdict
 from datetime import datetime, timedelta, time
 from zoneinfo import ZoneInfo
@@ -62,7 +59,6 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN environment variable not set")
 
-
 def connect_db_with_retry(dsn: str, tries: int = 40, delay: int = 2):
     """
     Railway sometimes restarts Postgres or it takes time to be reachable.
@@ -78,7 +74,7 @@ def connect_db_with_retry(dsn: str, tries: int = 40, delay: int = 2):
         except OperationalError as e:
             last = e
             print(f"⏳ DB not ready (attempt {i+1}/{tries}): {e}")
-            pytime.sleep(delay)  # ✅ FIX
+            pytime.sleep(delay)
     raise last
 
 
@@ -94,162 +90,154 @@ ALLOWED_PAGES = {
     "#alannapaid": "Alanna Paid",
     "#alannawelcome": "Alanna Welcome",
     "#alexalana": "Alexa lana",
+
     "#alexis": "Alexis",
+
     "#allyfree": "Ally Free",
     "#allypaid": "Ally Paid",
+
     "#aprilb": "April B",
     "#ashley": "Ashley",
+
     "#asiadollpaidfree": "Asia Doll Paid / Free",
+
     "#autumnfree": "Autumn Free",
     "#autumnpaid": "Autumn Paid",
     "#autumnwelcome": "Autumn Welcome",
+
     "#brifreeoftv": "Bri Free / OFTV",
     "#bripaid": "Bri Paid",
     "#briwelcome": "Bri Welcome",
+
     "#brittanyamain": "Brittanya Main",
     "#brittanyapaidfree": "Brittanya Paid / Free",
+
     "#bronwinfree": "Bronwin Free",
     "#bronwinoftvmcarteroftv": "Bronwin OFTV & MCarter OFTV",
     "#bronwinpaid": "Bronwin Paid",
     "#bronwinwelcome": "Bronwin Welcome",
+
     "#camipaid": "Cami Paid",
     "#camifree": "Cami Free",
+
     "#carterpaidfree": "Carter Paid / Free",
+
     "#christipaidfree": "Christi Paid and Free",
+
     "#claire": "Claire",
+
     "#charlotteppaid": "Charlotte P Paid",
     "#charlottepfree": "Charlotte P Free",
     "#oaklypaidfree": "Oakly Paid / Free",
+
     "#cocofree": "Coco Free",
     "#cocopaid": "Coco Paid",
+
     "#cynthiafree": "Cynthia Free",
+
     "#dandfreeoftv": "Dan D Free / OFTV",
     "#dandpaid": "Dan D Paid",
     "#dandwelcome": "Dan D Welcome",
+
     "#ella": "Ella",
+
     "#emilyraypaidfree": "Emily Ray Paid / Free",
+
     "#essiepaidfree": "Essie Paid / Free",
+
     "#fanslyteam1": "Fansly Team1",
     "#fanslyteam2": "Fansly Team2",
     "#fanslyteam3": "Fansly Team3",
     "#fanslyteam4": "Fansly Team4",
-    "#francescapaid": "Francesca Paid",
+
+    "#francescapaid":"Francesca Paid",
+
     "#gracefree": "Grace Free",
+
     "#haileywfree": "Hailey W Free",
     "#haileywpaid": "Hailey W Paid",
+
     "#hazeyfree": "Hazey Free",
     "#hazeypaid": "Hazey Paid",
     "#hazeywelcome": "Hazey Welcome",
+
     "#honeynoppv": "Honey NO PPV",
     "#honeyvip": "Honey VIP",
+
     "#isabellaxizziekay": "Isabella x Izzie Kay",
+
     "#isa": "Isa Amador",
+
     "#islafree": "Isla Free",
     "#islaoftv": "Isla OFTV",
     "#islapaid": "Isla Paid",
     "#islawelcome": "Isla Welcome",
+
     "#juliavip": "Julia Vip",
+
     "#jane": "Jane",
+    
     "#cat": "Cat",
+
     "#kayleexjasmyn": "Kaylee X Jasmyn",
+
     "#kissingcousinsxvalerievip": "Kissing Cousins X Valerie VIP",
+
     "#lexipaid": "Lexi Paid",
+
     "#lilahfree": "Lilah Free",
     "#lilahpaid": "Lilah Paid",
+
     "#lily": "Lily",
+    
     "#lucy": "Lucy",
+
     "#livv": "Livv",
+
     "#tasha": "Tasha",
+
     "#madelynpaid": "Madelyn Paid",
     "#madelynfree": "Madelyn Free",
+
     "#madison": "Madison",
+
     "#mathildefree": "Mathilde Free",
     "#mathildepaid": "Mathilde Paid",
     "#mathildewelcome": "Mathilde Welcome",
     "#mathildepaidxisaxalexalana": "Mathilde Paid x Isa A x Alexa Lana",
+
     "#michellefree": "Michelle Free",
     "#michellevip": "Michelle VIP",
+
     "#mommycarter": "Mommy Carter",
+
     "#natalialfree": "Natalia L Free",
     "#natalialpaid": "Natalia L Paid",
     "#natalialnicolefansly": "Natalia L, Nicole Fansly",
+
     "#natalierfree": "Natalie R Free",
     "#natalierpaid": "Natalie R Paid",
+
     "#niapaid": "nia Paid",
+
     "#paris": "Paris",
+
     "#popstfree": "Pops T Free",
     "#popstpaid": "Pops T Paid",
+
     "#rubirosefree": "Rubi Rose Free",
     "#rubirosepaid": "Rubi Rose Paid",
+
     "#salah": "Salah",
     "#sarahc": "Sarah C",
+
     "#skypaidfree": "Sky Paid / Free",
+    
     "#utahjazpaid": "Utahjaz Paid",
     "#utahjazfree": "Utahjaz Free",
+    
 }
 
-# =============================
-# ✅ WEBSITE PAGES (dynamic) + auto refresh
-# =============================
-
-t = normalize_tag(str(tag).lstrip("#"))
-
-    if not tag:
-        return ""
-    t = str(tag).strip().lower()
-    if not t.startswith("#"):
-        t = "#" + t
-    t = t.replace(" ", "").replace("_", "").replace("/", "").replace("&", "")
-    return t
-
-def load_pages_from_website_db() -> dict:
-    pages_url = os.getenv("WEBSITE_DATABASE_URL")
-    if not pages_url:
-        print("⚠️ WEBSITE_DATABASE_URL not set. Using hardcoded ALLOWED_PAGES only.")
-        return {}
-
-    try:
-        conn2 = psycopg2.connect(pages_url, sslmode="require", connect_timeout=5)
-        conn2.autocommit = True
-        with conn2.cursor() as cur:
-            cur.execute("""
-                SELECT tag, label
-                FROM pages
-                WHERE is_active = TRUE
-            """)
-            rows = cur.fetchall()
-        conn2.close()
-
-        out = {}
-        for tag, label in rows:
-            k = normalize_tag_key(tag)
-            if k:
-                out[k] = str(label)
-
-        print(f"✅ Loaded {len(out)} pages from WEBSITE DB.")
-        return out
-
-    except Exception as e:
-        print(f"⚠️ Failed loading WEBSITE DB pages: {e}")
-        return {}
-
-def merge_website_pages_into_allowed():
-    """
-    DB wins if same tag exists.
-    Also normalizes ALL existing keys so '#Test_5' works.
-    """
-    global ALLOWED_PAGES
-
-    normalized = {}
-    for k, v in ALLOWED_PAGES.items():
-        normalized[normalize_tag_key(k)] = v
-    ALLOWED_PAGES = normalized
-
-    ALLOWED_PAGES.update(load_pages_from_website_db())
-    print(f"🔁 Pages merged. Total ALLOWED_PAGES now: {len(ALLOWED_PAGES)}")
-
-async def refresh_pages_job(context: ContextTypes.DEFAULT_TYPE):
-    merge_website_pages_into_allowed()
 
 
 # ----------------- IN-MEM CACHE (loaded from DB) -----------------
@@ -282,14 +270,11 @@ def day_start_ph(dt: datetime) -> datetime:
     return datetime(dt.year, dt.month, dt.day, 0, 0, 0, tzinfo=PH_TZ)
 
 def normalize_page(raw_page: str):
-    """
-    ✅ Uses normalized hashtag keys + includes WEBSITE pages
-    Supports: +200 #test5
-    """
     if not raw_page:
         return None
-    token = raw_page.strip().split()[0]
-    token = normalize_tag_key(token)
+    token = raw_page.strip().split()[0].lower()
+    if not token.startswith("#"):
+        return None
     return ALLOWED_PAGES.get(token)
 
 def canonicalize_page_name(page_str: str):
@@ -297,7 +282,7 @@ def canonicalize_page_name(page_str: str):
     if not page_str:
         return None
     if page_str.lower().startswith("#"):
-        return ALLOWED_PAGES.get(normalize_tag_key(page_str))
+        return ALLOWED_PAGES.get(page_str.lower())
     return page_str
 
 def current_shift_label(dt: datetime) -> str:
@@ -632,11 +617,15 @@ def log_exc(prefix: str, e: Exception):
     traceback.print_exc()
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    # catches handler crashes (so you see them in Railway logs)
     e = context.error
     print("❌ HANDLER ERROR:", repr(e))
     traceback.print_exc()
 
 async def safe_send(bot, *, chat_id: int, thread_id: int | None, text: str, parse_mode: str | None = None):
+    """
+    Sends message and logs Flood control / too-long / bad requests.
+    """
     try:
         await bot.send_message(
             chat_id=chat_id,
@@ -647,6 +636,7 @@ async def safe_send(bot, *, chat_id: int, thread_id: int | None, text: str, pars
     except RetryAfter as e:
         log_exc("⏳ RetryAfter (flood control)", e)
     except BadRequest as e:
+        # often: "Message is too long" or markdown issues
         log_exc("⚠️ BadRequest", e)
     except (TimedOut, NetworkError) as e:
         log_exc("🌐 Network/TimedOut", e)
@@ -902,7 +892,7 @@ async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
             GROUP BY page
             ORDER BY total DESC
             """,
-            (team,),
+            (team,)
         )
         rows = cur.fetchall()
 
@@ -1035,6 +1025,8 @@ async def redpages(update: Update, context: ContextTypes.DEFAULT_TYPE):
             any_found = True
             msg += f"🔴 {page}: ${amt:.2f} / ${goal:.2f} ({pct:.1f}%)\n"
 
+# ... continuing from where your file cut off ...
+
     if not any_found:
         return await update.message.reply_text("✅ No red pages right now (this shift).")
     await update.message.reply_text(msg)
@@ -1156,6 +1148,7 @@ async def quota_period(update: Update, context: ContextTypes.DEFAULT_TYPE, days:
     for page, total in rows:
         totals[str(page)] = float(total)
 
+    # apply overrides (page totals)
     for page, val in manual_page_totals.items():
         if float(val) != 0:
             totals[page] = float(val)
@@ -1207,6 +1200,7 @@ async def editgoalboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         return await update.message.reply_text("Amount must be a number.")
 
+    # override BOTH shift + period totals
     manual_shift_totals[page] = amount
     manual_page_totals[page] = amount
     db_upsert_override(page, shift_total=amount, page_total=amount)
@@ -1305,11 +1299,17 @@ def db_list_team_details():
 
 def db_delete_team_by_name(team_name: str):
     with db.cursor() as cur:
+        # delete registrations + report destinations + available pages for that team
         cur.execute("DELETE FROM teams WHERE name=%s", (team_name,))
         cur.execute("DELETE FROM report_groups WHERE team=%s", (team_name,))
         cur.execute("DELETE FROM team_pages WHERE team=%s", (team_name,))
+        # NOTE: sales history stays (by design). If you want to delete sales too:
+        # cur.execute("DELETE FROM sales WHERE team=%s", (team_name,))
 
 async def listteams(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type == "private":
+        # allow in private too for owner
+        pass
     if not await require_owner(update):
         return
 
@@ -1324,6 +1324,8 @@ async def listteams(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg)
 
 async def deleteteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.type == "private":
+        pass
     if not await require_owner(update):
         return
 
@@ -1332,21 +1334,24 @@ async def deleteteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     arg = clean(" ".join(context.args)).strip()
 
-    teams = db_list_team_details()
+    teams = db_list_team_details()  # list of (name, count)
     if not teams:
         return await update.message.reply_text("No teams registered yet.")
 
+    # allow numeric index
     target = None
     if arg.isdigit():
         idx = int(arg)
         if 1 <= idx <= len(teams):
             target = teams[idx - 1][0]
     else:
+        # normalize "1" -> "Team 1" or direct match
         if arg.lower().startswith("team "):
             target = arg
         elif arg.isdigit():
             target = f"Team {arg}"
         else:
+            # try exact match
             for name, _ in teams:
                 if name.lower() == arg.lower():
                     target = name
@@ -1356,6 +1361,8 @@ async def deleteteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("Team not found. Use /listteams to see the list.")
 
     db_delete_team_by_name(target)
+
+    # refresh memory cache (so bot stops seeing old team mapping)
     load_from_db()
 
     await update.message.reply_text(f"🗑️ Deleted team registration: {target}\n(History sales are kept.)")
@@ -1381,13 +1388,15 @@ def _build_goalboard_table_lines(team: str, start: datetime):
     for page, total in rows:
         totals[str(page)] = float(total)
 
+    # apply shift overrides (non-zero)
     for page, val in manual_shift_totals.items():
         if float(val) != 0:
             totals[page] = float(val)
 
+    # ✅ ONLY show pages that exist for this team
     team_pages = set(db_get_team_pages(team))
-    team_pages |= set(totals.keys())
-    team_pages |= set(shift_goals.keys())
+    team_pages |= set(totals.keys())          # safety
+    team_pages |= set(shift_goals.keys())     # show goals even before sales
 
     all_pages = sorted(team_pages)
 
@@ -1442,6 +1451,10 @@ def _build_goalboard_table_lines(team: str, start: datetime):
     return header_text, [col_header, sep] + table_rows
 
 def _chunk_team_table_messages(team: str, header_text: str, lines: list[str]) -> list[str]:
+    """
+    Builds 1 message per team, but if too big -> Part 1/2, Part 2/2 etc (still per team).
+    Splits by TELEGRAM 4096 chars safely.
+    """
     if len(lines) <= 2:
         return [header_text + "\nNo pages found for this team yet."]
 
@@ -1452,16 +1465,19 @@ def _chunk_team_table_messages(team: str, header_text: str, lines: list[str]) ->
         body = "\n".join(table_head + rows)
         return prefix + "\n" + "```\n" + body + "\n```"
 
+    # try single message first
     one_prefix = header_text
     one_msg = build_msg(one_prefix, data_rows)
     if len(one_msg) <= TG_MAX:
         return [one_msg]
 
+    # otherwise split by char length
     parts: list[list[str]] = []
     current: list[str] = []
-    current_len = len(build_msg(f"🎯 GOALBOARD — {team} (Part 1/1)\n", []))
+    current_len = len(build_msg(f"🎯 GOALBOARD — {team} (Part 1/1)\n", []))  # base overhead estimate
 
     for r in data_rows:
+        # +1 for newline
         if current and (current_len + len(r) + 1) > (TG_SAFE):
             parts.append(current)
             current = [r]
@@ -1478,6 +1494,8 @@ def _chunk_team_table_messages(team: str, header_text: str, lines: list[str]) ->
     for i, rows in enumerate(parts, 1):
         prefix = header_text if i == 1 else f"🎯 GOALBOARD — {team} (Part {i}/{total_parts})\n"
         msg = build_msg(prefix, rows)
+
+        # if markdown makes it longer than max (rare), fallback to plain
         if len(msg) > TG_MAX:
             plain = prefix + "\n" + "\n".join(table_head + rows)
             msgs.append(plain[:TG_MAX])
@@ -1492,6 +1510,7 @@ async def send_scheduled_goalboard(context: ContextTypes.DEFAULT_TYPE):
 
     global_dest = db_get_global_report_dest()
 
+    # -------- GLOBAL MODE (ALL TEAMS -> one topic) --------
     if global_dest:
         dest_chat_id, dest_thread_id = global_dest
         teams = db_list_all_teams()
@@ -1503,6 +1522,7 @@ async def send_scheduled_goalboard(context: ContextTypes.DEFAULT_TYPE):
             msgs = _chunk_team_table_messages(team, header_text, lines)
 
             for m in msgs:
+                # try markdown, if fails safe_send logs it; we also fallback to plain on BadRequest below
                 await safe_send(
                     context.application.bot,
                     chat_id=dest_chat_id,
@@ -1512,6 +1532,7 @@ async def send_scheduled_goalboard(context: ContextTypes.DEFAULT_TYPE):
                 )
         return
 
+    # -------- PER-TEAM MODE --------
     report_groups = db_get_report_groups()
     if not report_groups:
         return
@@ -1534,19 +1555,8 @@ def main():
     init_db()
     load_from_db()
 
-    # ✅ load website pages on startup
-    merge_website_pages_into_allowed()
-
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_error_handler(error_handler)
-
-    # ✅ refresh website pages every 60 seconds (near real-time)
-    app.job_queue.run_repeating(
-        refresh_pages_job,
-        interval=60,
-        first=5,
-        name="refresh_pages",
-    )
 
     # sales input
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_sales))
@@ -1563,8 +1573,8 @@ def main():
     app.add_handler(CommandHandler("registergoal", registergoal))
     app.add_handler(CommandHandler("registergoalall", registergoalall))
     app.add_handler(CommandHandler("resetdaily", resetdaily))
-    app.add_handler(CommandHandler("listteams", listteams))
-    app.add_handler(CommandHandler("deleteteam", deleteteam))
+    app.add_handler(CommandHandler("listteams", listteams))      # ✅ NEW
+    app.add_handler(CommandHandler("deleteteam", deleteteam))    # ✅ NEW
 
     # everyone
     app.add_handler(CommandHandler("pages", pages))
@@ -1600,5 +1610,16 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
+
+
+
+
+
 
 
