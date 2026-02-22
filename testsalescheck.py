@@ -1,4 +1,3 @@
-
 # ==========================================
 #   ULTIMATE SALES + GOAL BOT (RAILWAY) - DB VERSION + AUTO GOALBOARD REPORTS (TOPIC SUPPORT)
 #   - Saves sales/goals/admins/teams/overrides to Postgres
@@ -30,6 +29,7 @@
 import time as pytime
 import os
 import traceback
+import math
 from collections import defaultdict
 from datetime import datetime, timedelta, time
 from zoneinfo import ZoneInfo
@@ -240,10 +240,7 @@ ALLOWED_PAGES = {
     "#jostasyfree": "Jostasy Free",
     "#dakota": "Dakota",
     "#sid": "Sid",
-    
 }
-
-
 
 # ----------------- IN-MEM CACHE (loaded from DB) -----------------
 GROUP_TEAMS = {}  # chat_id -> team name
@@ -322,6 +319,24 @@ def get_color(p):
     if p >= 31: return "🟡"
     if p >= 11: return "🟠"
     return "🔴"
+
+# ----------------- PACE SETTINGS -----------------
+SHIFT_LENGTH_HOURS = 8
+CHECKPOINT_HOURS = 2
+CHECKPOINTS_PER_SHIFT = SHIFT_LENGTH_HOURS // CHECKPOINT_HOURS  # 4 checks
+
+def pace_checkpoint(now: datetime, start: datetime):
+    """
+    Step pacing: every CHECKPOINT_HOURS.
+    Example: goal=4000 => checkpoints: 1000, 2000, 3000, 4000
+    """
+    elapsed_hours = (now - start).total_seconds() / 3600.0
+    check_idx = int(math.ceil(elapsed_hours / CHECKPOINT_HOURS))
+    check_idx = max(1, min(CHECKPOINTS_PER_SHIFT, check_idx))
+
+    checkpoint_time = start + timedelta(hours=check_idx * CHECKPOINT_HOURS)
+    target_ratio = check_idx / float(CHECKPOINTS_PER_SHIFT)
+    return check_idx, target_ratio, checkpoint_time
 
 # ----------------- DB SCHEMA + HELPERS -----------------
 def init_db():
@@ -622,7 +637,6 @@ def log_exc(prefix: str, e: Exception):
     traceback.print_exc()
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    # catches handler crashes (so you see them in Railway logs)
     e = context.error
     print("❌ HANDLER ERROR:", repr(e))
     traceback.print_exc()
@@ -641,7 +655,6 @@ async def safe_send(bot, *, chat_id: int, thread_id: int | None, text: str, pars
     except RetryAfter as e:
         log_exc("⏳ RetryAfter (flood control)", e)
     except BadRequest as e:
-        # often: "Message is too long" or markdown issues
         log_exc("⚠️ BadRequest", e)
     except (TimedOut, NetworkError) as e:
         log_exc("🌐 Network/TimedOut", e)
@@ -945,6 +958,7 @@ async def setgoal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += "\n\n⚠️ Invalid:\n" + "\n".join(errors)
     await update.message.reply_text(msg)
 
+# ✅ UPDATED: /goalboard now includes 2-hour pacing targets
 async def goalboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     team = await require_team(update)
     if team is None:
@@ -953,6 +967,8 @@ async def goalboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now = now_ph()
     start = shift_start(now)
     label = current_shift_label(now)
+
+    check_idx, target_ratio, checkpoint_time = pace_checkpoint(now, start)
 
     with db.cursor() as cur:
         cur.execute(
@@ -976,15 +992,38 @@ async def goalboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not totals:
         return await update.message.reply_text(
-            f"🎯 GOAL PROGRESS — {team}\n🕒 Shift: {label}\n✅ Shift started: {start.strftime('%b %d, %Y %I:%M %p')} (PH)\n\nNo sales yet for this shift."
+            f"🎯 GOAL PROGRESS — {team}\n"
+            f"🕒 Shift: {label}\n"
+            f"✅ Shift started: {start.strftime('%b %d, %Y %I:%M %p')} (PH)\n"
+            f"⏱️ Pace check: #{check_idx}/{CHECKPOINTS_PER_SHIFT} "
+            f"(target by {checkpoint_time.strftime('%I:%M %p')} PH)\n\n"
+            "No sales yet for this shift."
         )
 
-    msg = f"🎯 GOAL PROGRESS — {team}\n🕒 Shift: {label}\n✅ Shift started: {start.strftime('%b %d, %Y %I:%M %p')} (PH)\n\n"
+    msg = (
+        f"🎯 GOAL PROGRESS — {team}\n"
+        f"🕒 Shift: {label}\n"
+        f"✅ Shift started: {start.strftime('%b %d, %Y %I:%M %p')} (PH)\n"
+        f"⏱️ Pace check: #{check_idx}/{CHECKPOINTS_PER_SHIFT} "
+        f"(target by {checkpoint_time.strftime('%I:%M %p')} PH)\n\n"
+    )
+
     for page, amt in sorted(totals.items(), key=lambda x: x[1], reverse=True):
-        goal = shift_goals.get(page, 0)
-        if goal:
-            pct = (amt / goal) * 100
-            msg += f"{get_color(pct)} {page}: ${amt:.2f} / ${goal:.2f} ({pct:.1f}%)\n"
+        goal = float(shift_goals.get(page, 0) or 0)
+
+        if goal > 0:
+            pct = (amt / goal) * 100.0
+
+            pace_target = goal * target_ratio
+            gap = max(0.0, pace_target - amt)
+            pace_pct = (amt / pace_target * 100.0) if pace_target > 0 else 0.0
+            pace_color = get_color(pace_pct)
+
+            msg += (
+                f"{get_color(pct)} {page}: ${amt:.2f} / ${goal:.2f} ({pct:.1f}%)\n"
+                f"   {pace_color} Pace target: ${pace_target:.2f} "
+                f"(need ${gap:.2f} more by {checkpoint_time.strftime('%I:%M %p')} PH)\n"
+            )
         else:
             msg += f"⚪ {page}: ${amt:.2f} (no shift goal)\n"
 
@@ -1029,8 +1068,6 @@ async def redpages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if pct < 31:
             any_found = True
             msg += f"🔴 {page}: ${amt:.2f} / ${goal:.2f} ({pct:.1f}%)\n"
-
-# ... continuing from where your file cut off ...
 
     if not any_found:
         return await update.message.reply_text("✅ No red pages right now (this shift).")
@@ -1205,7 +1242,6 @@ async def editgoalboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         return await update.message.reply_text("Amount must be a number.")
 
-    # override BOTH shift + period totals
     manual_shift_totals[page] = amount
     manual_page_totals[page] = amount
     db_upsert_override(page, shift_total=amount, page_total=amount)
@@ -1304,7 +1340,6 @@ def db_list_team_details():
 
 def db_delete_team_by_name(team_name: str):
     with db.cursor() as cur:
-        # delete registrations + report destinations + available pages for that team
         cur.execute("DELETE FROM teams WHERE name=%s", (team_name,))
         cur.execute("DELETE FROM report_groups WHERE team=%s", (team_name,))
         cur.execute("DELETE FROM team_pages WHERE team=%s", (team_name,))
@@ -1313,7 +1348,6 @@ def db_delete_team_by_name(team_name: str):
 
 async def listteams(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type == "private":
-        # allow in private too for owner
         pass
     if not await require_owner(update):
         return
@@ -1339,24 +1373,21 @@ async def deleteteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     arg = clean(" ".join(context.args)).strip()
 
-    teams = db_list_team_details()  # list of (name, count)
+    teams = db_list_team_details()
     if not teams:
         return await update.message.reply_text("No teams registered yet.")
 
-    # allow numeric index
     target = None
     if arg.isdigit():
         idx = int(arg)
         if 1 <= idx <= len(teams):
             target = teams[idx - 1][0]
     else:
-        # normalize "1" -> "Team 1" or direct match
         if arg.lower().startswith("team "):
             target = arg
         elif arg.isdigit():
             target = f"Team {arg}"
         else:
-            # try exact match
             for name, _ in teams:
                 if name.lower() == arg.lower():
                     target = name
@@ -1366,16 +1397,15 @@ async def deleteteam(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("Team not found. Use /listteams to see the list.")
 
     db_delete_team_by_name(target)
-
-    # refresh memory cache (so bot stops seeing old team mapping)
     load_from_db()
-
     await update.message.reply_text(f"🗑️ Deleted team registration: {target}\n(History sales are kept.)")
 
 # ----------------- SCHEDULED GOALBOARD (TABLE) -----------------
 def _build_goalboard_table_lines(team: str, start: datetime):
     now = now_ph()
     label = current_shift_label(now)
+
+    check_idx, target_ratio, checkpoint_time = pace_checkpoint(now, start)
 
     with db.cursor() as cur:
         cur.execute(
@@ -1400,14 +1430,16 @@ def _build_goalboard_table_lines(team: str, start: datetime):
 
     # ✅ ONLY show pages that exist for this team
     team_pages = set(db_get_team_pages(team))
-    team_pages |= set(totals.keys())          # safety
-    team_pages |= set(shift_goals.keys())     # show goals even before sales
+    team_pages |= set(totals.keys())
+    team_pages |= set(shift_goals.keys())
 
     all_pages = sorted(team_pages)
 
     PAGE_W = 26
     SALES_W = 10
     GOAL_W = 10
+    TARGET_W = 10
+    GAP_W = 10
     PCT_W = 7
 
     def trunc(s: str, w: int):
@@ -1423,18 +1455,37 @@ def _build_goalboard_table_lines(team: str, start: datetime):
         amt = float(totals.get(page, 0.0))
         goal = float(shift_goals.get(page, 0.0))
 
-        pct = (amt / goal * 100.0) if goal > 0 else 0.0
-        color = get_color(pct) if goal > 0 else "⚪"
-
         grand_sales += amt
 
-        row = (
-            f"{color} "
-            f"{trunc(page, PAGE_W)} "
-            f"{('$' + format(amt, '.2f')).rjust(SALES_W)} "
-            f"{('$' + format(goal, '.2f')).rjust(GOAL_W) if goal > 0 else ' ' * GOAL_W} "
-            f"{(format(pct, '.1f') + '%').rjust(PCT_W) if goal > 0 else ' ' * PCT_W}"
-        )
+        if goal > 0:
+            pct = (amt / goal * 100.0)
+
+            pace_target = goal * target_ratio
+            gap = max(0.0, pace_target - amt)
+
+            pace_pct = (amt / pace_target * 100.0) if pace_target > 0 else 0.0
+            pace_color = get_color(pace_pct)
+
+            row = (
+                f"{pace_color} "
+                f"{trunc(page, PAGE_W)} "
+                f"{('$' + format(amt, '.2f')).rjust(SALES_W)} "
+                f"{('$' + format(goal, '.2f')).rjust(GOAL_W)} "
+                f"{('$' + format(pace_target, '.2f')).rjust(TARGET_W)} "
+                f"{('$' + format(gap, '.2f')).rjust(GAP_W)} "
+                f"{(format(pct, '.1f') + '%').rjust(PCT_W)}"
+            )
+        else:
+            row = (
+                f"⚪ "
+                f"{trunc(page, PAGE_W)} "
+                f"{('$' + format(amt, '.2f')).rjust(SALES_W)} "
+                f"{' ' * GOAL_W} "
+                f"{' ' * TARGET_W} "
+                f"{' ' * GAP_W} "
+                f"{' ' * PCT_W}"
+            )
+
         table_rows.append(row)
 
     header_text = (
@@ -1442,6 +1493,8 @@ def _build_goalboard_table_lines(team: str, start: datetime):
         f"🕒 Shift: {label}\n"
         f"✅ Shift started: {start.strftime('%b %d, %Y %I:%M %p')} (PH)\n"
         f"📌 Updated: {now.strftime('%b %d, %Y %I:%M %p')} (PH)\n"
+        f"⏱️ Pace check: #{check_idx}/{CHECKPOINTS_PER_SHIFT} "
+        f"(target by {checkpoint_time.strftime('%I:%M %p')} PH)\n"
         f"💰 Shift Total: ${grand_sales:.2f}\n"
     )
 
@@ -1449,9 +1502,11 @@ def _build_goalboard_table_lines(team: str, start: datetime):
         f"   {'PAGE'.ljust(PAGE_W)} "
         f"{'SALES'.rjust(SALES_W)} "
         f"{'GOAL'.rjust(GOAL_W)} "
+        f"{'TARGET'.rjust(TARGET_W)} "
+        f"{'GAP'.rjust(GAP_W)} "
         f"{'%'.rjust(PCT_W)}"
     )
-    sep = "-" * (3 + PAGE_W + 1 + SALES_W + 1 + GOAL_W + 1 + PCT_W)
+    sep = "-" * (3 + PAGE_W + 1 + SALES_W + 1 + GOAL_W + 1 + TARGET_W + 1 + GAP_W + 1 + PCT_W)
 
     return header_text, [col_header, sep] + table_rows
 
@@ -1470,19 +1525,16 @@ def _chunk_team_table_messages(team: str, header_text: str, lines: list[str]) ->
         body = "\n".join(table_head + rows)
         return prefix + "\n" + "```\n" + body + "\n```"
 
-    # try single message first
     one_prefix = header_text
     one_msg = build_msg(one_prefix, data_rows)
     if len(one_msg) <= TG_MAX:
         return [one_msg]
 
-    # otherwise split by char length
     parts: list[list[str]] = []
     current: list[str] = []
-    current_len = len(build_msg(f"🎯 GOALBOARD — {team} (Part 1/1)\n", []))  # base overhead estimate
+    current_len = len(build_msg(f"🎯 GOALBOARD — {team} (Part 1/1)\n", []))
 
     for r in data_rows:
-        # +1 for newline
         if current and (current_len + len(r) + 1) > (TG_SAFE):
             parts.append(current)
             current = [r]
@@ -1500,7 +1552,6 @@ def _chunk_team_table_messages(team: str, header_text: str, lines: list[str]) ->
         prefix = header_text if i == 1 else f"🎯 GOALBOARD — {team} (Part {i}/{total_parts})\n"
         msg = build_msg(prefix, rows)
 
-        # if markdown makes it longer than max (rare), fallback to plain
         if len(msg) > TG_MAX:
             plain = prefix + "\n" + "\n".join(table_head + rows)
             msgs.append(plain[:TG_MAX])
@@ -1527,7 +1578,6 @@ async def send_scheduled_goalboard(context: ContextTypes.DEFAULT_TYPE):
             msgs = _chunk_team_table_messages(team, header_text, lines)
 
             for m in msgs:
-                # try markdown, if fails safe_send logs it; we also fallback to plain on BadRequest below
                 await safe_send(
                     context.application.bot,
                     chat_id=dest_chat_id,
@@ -1578,8 +1628,8 @@ def main():
     app.add_handler(CommandHandler("registergoal", registergoal))
     app.add_handler(CommandHandler("registergoalall", registergoalall))
     app.add_handler(CommandHandler("resetdaily", resetdaily))
-    app.add_handler(CommandHandler("listteams", listteams))      # ✅ NEW
-    app.add_handler(CommandHandler("deleteteam", deleteteam))    # ✅ NEW
+    app.add_handler(CommandHandler("listteams", listteams))
+    app.add_handler(CommandHandler("deleteteam", deleteteam))
 
     # everyone
     app.add_handler(CommandHandler("pages", pages))
@@ -1615,19 +1665,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
