@@ -236,7 +236,8 @@ ALLOWED_PAGES = {
     "#utahjazpaid": "Utahjaz Paid",
     "#utahjazfree": "Utahjaz Free",
     
-    "#jostasy": "Jostasy",
+    "#jostasypaid": "Jostasy Paid",
+    "#jostasyfree: "Jostasy Free",
     "#dakota": "Dakota",
     "#sid": "Sid",
     
@@ -1614,6 +1615,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
