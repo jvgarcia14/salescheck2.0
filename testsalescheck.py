@@ -240,6 +240,7 @@ ALLOWED_PAGES = {
     "#jostasyfree": "Jostasy Free",
     "#dakota": "Dakota",
     "#sid": "Sid",
+    "#tylerg": "Tylerg",
 }
 
 # ----------------- IN-MEM CACHE (loaded from DB) -----------------
@@ -1665,3 +1666,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
