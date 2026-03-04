@@ -24,6 +24,12 @@
 #
 #   ✅ NO MORE SILENT FAILURES
 #     - logs RetryAfter (flood control), message-too-long, etc. in Railway logs
+#
+#   ✅ NEW FOR TIERS (Chatter Sales)
+#     - Adds columns to sales table automatically (no manual DB edits):
+#         chatter_id, chatter_name, chatter_username
+#     - Saves Telegram chatter identity for every sale recorded
+#     - Website can compute tiers by grouping per chatter_id
 # ==========================================
 
 import time as pytime
@@ -59,6 +65,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN environment variable not set")
 
+
 def connect_db_with_retry(dsn: str, tries: int = 40, delay: int = 2):
     """
     Railway sometimes restarts Postgres or it takes time to be reachable.
@@ -90,153 +97,99 @@ ALLOWED_PAGES = {
     "#alannapaid": "Alanna Paid",
     "#alannawelcome": "Alanna Welcome",
     "#alexalana": "Alexa lana",
-
     "#alexis": "Alexis",
-
     "#allyfree": "Ally Free",
     "#allypaid": "Ally Paid",
-
     "#aprilb": "April B",
     "#ashley": "Ashley",
-
     "#asiadollpaidfree": "Asia Doll Paid / Free",
-
     "#autumnfree": "Autumn Free",
     "#autumnpaid": "Autumn Paid",
     "#autumnwelcome": "Autumn Welcome",
-
     "#brifreeoftv": "Bri Free / OFTV",
     "#bripaid": "Bri Paid",
     "#briwelcome": "Bri Welcome",
-
     "#brittanyamain": "Brittanya Main",
     "#brittanyapaidfree": "Brittanya Paid / Free",
-
     "#bronwinfree": "Bronwin Free",
     "#bronwinoftvmcarteroftv": "Bronwin OFTV & MCarter OFTV",
     "#bronwinpaid": "Bronwin Paid",
     "#bronwinwelcome": "Bronwin Welcome",
-
     "#camipaid": "Cami Paid",
     "#camifree": "Cami Free",
-
     "#carterpaidfree": "Carter Paid / Free",
-
     "#christipaidfree": "Christi Paid and Free",
-
     "#claire": "Claire",
-
     "#charlotteppaid": "Charlotte P Paid",
     "#charlottepfree": "Charlotte P Free",
     "#oaklypaidfree": "Oakly Paid / Free",
-
     "#cocofree": "Coco Free",
     "#cocopaid": "Coco Paid",
-
     "#cynthiafree": "Cynthia Free",
-
     "#dandfreeoftv": "Dan D Free / OFTV",
     "#dandpaid": "Dan D Paid",
     "#dandwelcome": "Dan D Welcome",
-
     "#ella": "Ella",
-
     "#emilyraypaidfree": "Emily Ray Paid / Free",
-
     "#essiepaidfree": "Essie Paid / Free",
-
     "#fanslyteam1": "Fansly Team1",
     "#fanslyteam2": "Fansly Team2",
     "#fanslyteam3": "Fansly Team3",
     "#fanslyteam4": "Fansly Team4",
     "#fanslyteam5": "Fansly Team5",
-
-    "#francescapaid":"Francesca Paid",
-
+    "#francescapaid": "Francesca Paid",
     "#gracefree": "Grace Free",
-
     "#haileywfree": "Hailey W Free",
     "#haileywpaid": "Hailey W Paid",
-
     "#hazeyfree": "Hazey Free",
     "#hazeypaid": "Hazey Paid",
     "#hazeywelcome": "Hazey Welcome",
-
     "#honeynoppv": "Honey NO PPV",
     "#honeyvip": "Honey VIP",
-
     "#isabellaxizziekay": "Isabella x Izzie Kay",
-
     "#isa": "Isa Amador",
-
     "#islafree": "Isla Free",
     "#islaoftv": "Isla OFTV",
     "#islapaid": "Isla Paid",
     "#islawelcome": "Isla Welcome",
-
     "#juliavip": "Julia Vip",
-
     "#jane": "Jane",
-    
     "#cat": "Cat",
-
     "#kayleexjasmyn": "Kaylee X Jasmyn",
-
     "#kissingcousinsxvalerievip": "Kissing Cousins X Valerie VIP",
-
     "#lexipaid": "Lexi Paid",
-
     "#lilahfree": "Lilah Free",
     "#lilahpaid": "Lilah Paid",
-
     "#lily": "Lily",
-    
     "#lucy": "Lucy",
-
     "#livv": "Livv",
-
     "#tasha": "Tasha",
-
     "#madelynpaid": "Madelyn Paid",
     "#madelynfree": "Madelyn Free",
-
     "#madison": "Madison",
-
     "#mathildefree": "Mathilde Free",
     "#mathildepaid": "Mathilde Paid",
     "#mathildewelcome": "Mathilde Welcome",
     "#mathildepaidxisaxalexalana": "Mathilde Paid x Isa A x Alexa Lana",
-
     "#michellefree": "Michelle Free",
     "#michellevip": "Michelle VIP",
-
     "#mommycarter": "Mommy Carter",
-
     "#natalialfree": "Natalia L Free",
     "#natalialpaid": "Natalia L Paid",
     "#natalialnicolefansly": "Natalia L, Nicole Fansly",
-
     "#natalierfree": "Natalie R Free",
     "#natalierpaid": "Natalie R Paid",
-
     "#niapaid": "nia Paid",
-
     "#paris": "Paris",
-
     "#popstfree": "Pops T Free",
     "#popstpaid": "Pops T Paid",
-
     "#rubirosefree": "Rubi Rose Free",
     "#rubirosepaid": "Rubi Rose Paid",
-
     "#salah": "Salah",
     "#sarahc": "Sarah C",
-
     "#skypaidfree": "Sky Paid / Free",
-    
     "#utahjazpaid": "Utahjaz Paid",
     "#utahjazfree": "Utahjaz Free",
-    
     "#jostasypaid": "Jostasy Paid",
     "#jostasyfree": "Jostasy Free",
     "#dakota": "Dakota",
@@ -248,8 +201,6 @@ ALLOWED_PAGES = {
     "#kyliepaid": "Kylie Paid",
     "#sagepaid": "Sage Paid",
     "#sagefree": "Sage Free",
-    
-    
 }
 
 # ----------------- IN-MEM CACHE (loaded from DB) -----------------
@@ -257,10 +208,10 @@ GROUP_TEAMS = {}  # chat_id -> team name
 CHAT_ADMINS = defaultdict(dict)  # chat_id -> {user_id: level}
 
 shift_goals = defaultdict(float)  # page -> goal (global per page in this DB schema)
-page_goals = defaultdict(float)   # page -> goal (global per page in this DB schema)
+page_goals = defaultdict(float)  # page -> goal (global per page in this DB schema)
 
 manual_shift_totals = defaultdict(float)  # page -> override amount
-manual_page_totals = defaultdict(float)   # page -> override amount
+manual_page_totals = defaultdict(float)  # page -> override amount
 
 # ---------------- UTIL ----------------
 def clean(text: str):
@@ -416,6 +367,12 @@ def init_db():
         cur.execute("""CREATE INDEX IF NOT EXISTS idx_sales_team_ts ON sales (team, ts DESC);""")
         cur.execute("""CREATE INDEX IF NOT EXISTS idx_sales_team_page_ts ON sales (team, page, ts DESC);""")
 
+        # ✅ NEW: Auto-migrate sales table for tiers (no manual DB editing)
+        cur.execute("""ALTER TABLE sales ADD COLUMN IF NOT EXISTS chatter_id BIGINT;""")
+        cur.execute("""ALTER TABLE sales ADD COLUMN IF NOT EXISTS chatter_name TEXT;""")
+        cur.execute("""ALTER TABLE sales ADD COLUMN IF NOT EXISTS chatter_username TEXT;""")
+        cur.execute("""CREATE INDEX IF NOT EXISTS idx_sales_chatter_ts ON sales (chatter_id, ts DESC);""")
+
 def db_register_team(chat_id: int, team_name: str):
     with db.cursor() as cur:
         cur.execute(
@@ -450,11 +407,23 @@ def db_delete_admin(chat_id: int, user_id: int):
     with db.cursor() as cur:
         cur.execute("DELETE FROM admins WHERE chat_id=%s AND user_id=%s", (chat_id, user_id))
 
-def db_add_sale(team: str, page: str, amount: float, ts_iso: str):
+# ✅ UPDATED: now saves chatter_id/name/username for tiers
+def db_add_sale(
+    team: str,
+    page: str,
+    amount: float,
+    ts_iso: str,
+    chatter_id: int | None,
+    chatter_name: str | None,
+    chatter_username: str | None,
+):
     with db.cursor() as cur:
         cur.execute(
-            "INSERT INTO sales (team, page, amount, ts) VALUES (%s, %s, %s, %s)",
-            (team, page, amount, ts_iso)
+            """
+            INSERT INTO sales (team, page, amount, ts, chatter_id, chatter_name, chatter_username)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """,
+            (team, page, amount, ts_iso, chatter_id, chatter_name, chatter_username),
         )
 
 def db_add_team_page(team: str, page: str):
@@ -858,6 +827,12 @@ async def handle_sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if team is None:
         return
 
+    # ✅ NEW: Capture chatter identity for tiers
+    u = update.effective_user
+    chatter_id = u.id if u else None
+    chatter_name = (u.full_name if u else None) or (u.first_name if u else None) or None
+    chatter_username = ("@" + u.username) if (u and u.username) else None
+
     saved = False
     unknown_tags = set()
     ts_iso = now_ph().isoformat()
@@ -883,7 +858,7 @@ async def handle_sales(update: Update, context: ContextTypes.DEFAULT_TYPE):
             unknown_tags.add(bad_token)
             continue
 
-        db_add_sale(team, canonical_page, float(amount), ts_iso)
+        db_add_sale(team, canonical_page, float(amount), ts_iso, chatter_id, chatter_name, chatter_username)
         db_add_team_page(team, canonical_page)  # ✅ auto-available
         saved = True
 
@@ -1675,8 +1650,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
