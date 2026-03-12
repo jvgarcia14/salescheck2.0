@@ -206,7 +206,7 @@ ALLOWED_PAGES = {
     "#victoriafree": "Victoria Free",
     "#hammypaid": "Hammy Paid",
     "#hammyfree": "Hammy Free",
-    "#lyssa": "#Lyssa",
+    "#lyssa": "Lyssa",
     
     
 }
@@ -1658,6 +1658,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
