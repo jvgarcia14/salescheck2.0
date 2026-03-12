@@ -206,6 +206,8 @@ ALLOWED_PAGES = {
     "#victoriafree": "Victoria Free",
     "#hammypaid": "Hammy Paid",
     "#hammyfree": "Hammy Free",
+    "#lyssa": "#Lyssa",
+    
     
 }
 
