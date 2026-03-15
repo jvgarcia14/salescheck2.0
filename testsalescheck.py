@@ -207,6 +207,8 @@ ALLOWED_PAGES = {
     "#hammypaid": "Hammy Paid",
     "#hammyfree": "Hammy Free",
     "#lyssa": "Lyssa",
+    
+    
 }
 
 # ----------------- IN-MEM CACHE (loaded from DB) -----------------
@@ -1601,20 +1603,7 @@ def main():
     init_db()
     load_from_db()
 
-    app = (
-        ApplicationBuilder()
-        .token(BOT_TOKEN)
-        .connect_timeout(30)
-        .read_timeout(30)
-        .write_timeout(30)
-        .pool_timeout(30)
-        .get_updates_connect_timeout(30)
-        .get_updates_read_timeout(30)
-        .get_updates_write_timeout(30)
-        .get_updates_pool_timeout(30)
-        .build()
-    )
-
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_error_handler(error_handler)
 
     # sales input
@@ -1665,12 +1654,13 @@ def main():
         )
 
     print("BOT RUNNING…")
-    app.run_polling(
-        close_loop=False,
-        timeout=30,
-        bootstrap_retries=-1,
-        drop_pending_updates=False,
-    )
+    app.run_polling(close_loop=False)
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
