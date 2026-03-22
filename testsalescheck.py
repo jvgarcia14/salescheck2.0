@@ -210,6 +210,7 @@ ALLOWED_PAGES = {
     "#niohuru": "Niohuru",
     "#scarlettemoon": "Scarlettemoon",
     "#leahgotti": "LeahGotti",
+    "#vampire": "Vampire",
     
     
 }
