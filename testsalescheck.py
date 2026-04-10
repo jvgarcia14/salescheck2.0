@@ -94,6 +94,7 @@ TG_SAFE = 3900  # leave room for headers/markdown
 # ----------------- PAGES -----------------
 ALLOWED_PAGES = {
     "#sarahlloyd": "Sarah Lloyd",
+    "#Zoe": "zoe",
     "#marco": "Marco",
     "#Alexa Lana/Scarlette Moon": "AlexaLana/ScarletteMoon",
     "#Autumn,Bri,Dan,Bron OFTV": "Autumn,Bri,Dan,BronOFTV",
